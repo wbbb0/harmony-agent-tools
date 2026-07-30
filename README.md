@@ -2,7 +2,7 @@
 
 `harmony-agent-tools` is a self-contained PowerShell 5.1-compatible wrapper around official HarmonyOS command-line
 tools. It is designed for coding agents and intentionally avoids importing application source or build
-configuration so the directory can later become a standalone repository.
+configuration.
 
 ## Goals
 
@@ -22,13 +22,13 @@ configuration so the directory can later become a standalone repository.
 When local PowerShell policy allows scripts:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.ps1 targets
+./hdc-agent.ps1 targets
 ```
 
 On Windows, the command shim avoids changing the user or machine execution policy:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd targets
+./hdc-agent.cmd targets
 ```
 
 Every successful command writes JSON to stdout. Errors go to stderr and produce a non-zero exit code.
@@ -36,7 +36,7 @@ Every successful command writes JSON to stdout. Errors go to stderr and produce 
 ## Device selection
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd targets
+./hdc-agent.cmd targets
 ```
 
 When more than one usable target is connected, all device-changing or capture commands require `-Target`:
@@ -50,7 +50,7 @@ The wrapper does not guess between connected devices.
 On Windows, map running DevEco emulator names to HDC targets:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd emulators
+./hdc-agent.cmd emulators
 ```
 
 This removes the need to correlate `Emulator.exe` process arguments and listening ports manually.
@@ -58,9 +58,9 @@ This removes the need to correlate `Emulator.exe` process arguments and listenin
 All target-bound commands can select a running DevEco emulator by exact name instead of copying its dynamic port:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd screenshot `
+./hdc-agent.cmd screenshot `
   -EmulatorName "Pura 90" `
-  -OutputPath ./tools/harmony-agent-tools/artifacts/pura-90.jpeg
+  -OutputPath ./artifacts/pura-90.jpeg
 ```
 
 `-Target` and `-EmulatorName` are mutually exclusive. Use `-Target` for physical devices or when emulator names are
@@ -69,13 +69,13 @@ duplicated.
 Check the local SDK, commands, connected targets and optional project artifacts:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd doctor -ProjectRoot .
+./hdc-agent.cmd doctor -ProjectRoot .
 ```
 
 Query the physical target display:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd display -EmulatorName "Pura 90"
+./hdc-agent.cmd display -EmulatorName "Pura 90"
 ```
 
 ## Touch
@@ -83,14 +83,14 @@ Query the physical target display:
 Tap:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd tap `
+./hdc-agent.cmd tap `
   -Target 127.0.0.1:5555 -X 600 -Y 900
 ```
 
 Smooth touch movement:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd swipe `
+./hdc-agent.cmd swipe `
   -Target 127.0.0.1:5555 `
   -StartX 600 -StartY 1000 -EndX 600 -EndY 300 -DurationMs 500
 ```
@@ -100,10 +100,10 @@ Coordinates are physical pixels from the top-left of the target display, matchin
 For reusable scenarios, use coordinates normalized to the range `0..1`:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd tap `
+./hdc-agent.cmd tap `
   -EmulatorName "Pura 90" -XRatio 0.5 -YRatio 0.8
 
-./tools/harmony-agent-tools/hdc-agent.cmd swipe `
+./hdc-agent.cmd swipe `
   -EmulatorName "Pura 90" `
   -StartXRatio 0.5 -StartYRatio 0.8 -EndXRatio 0.5 -EndYRatio 0.2
 ```
@@ -118,17 +118,17 @@ Use `-DryRun` to validate and inspect the generated command without injecting in
 Capture immediately:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd screenshot `
+./hdc-agent.cmd screenshot `
   -Target 127.0.0.1:5555 `
-  -OutputPath ./tools/harmony-agent-tools/artifacts/current.jpeg
+  -OutputPath ./artifacts/current.jpeg
 ```
 
 Capture after a relative delay:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd screenshot `
+./hdc-agent.cmd screenshot `
   -Target 127.0.0.1:5555 -DelayMs 250 `
-  -OutputPath ./tools/harmony-agent-tools/artifacts/after-250ms.jpeg
+  -OutputPath ./artifacts/after-250ms.jpeg
 ```
 
 `snapshot_display` is used with its portable JPEG output. Screenshot paths must end in `.jpg` or `.jpeg`; omitting
@@ -142,11 +142,11 @@ This command starts `uinput` asynchronously, schedules `snapshot_display` comman
 pulls every image after capture:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd gesture-capture `
+./hdc-agent.cmd gesture-capture `
   -Target 127.0.0.1:5555 `
   -StartX 600 -StartY 1000 -EndX 600 -EndY 300 `
   -DurationMs 500 -CaptureAtMs 0,100,250,500 `
-  -OutputDirectory ./tools/harmony-agent-tools/artifacts/gesture `
+  -OutputDirectory ./artifacts/gesture `
   -Prefix swipe-up
 ```
 
@@ -165,7 +165,7 @@ The smoke test exercises portable command paths in dry-run mode, package discove
 time-point parsing and screenshot extension validation without requiring a device:
 
 ```powershell
-./tools/harmony-agent-tools/tests/Smoke.ps1
+./tests/Smoke.ps1
 ```
 
 The MCP adapter has a device-free content test:
@@ -177,7 +177,7 @@ npm run test:mcp
 Run the complete portable verification suite with one command:
 
 ```powershell
-./tools/harmony-agent-tools/tests/Verify.ps1
+./tests/Verify.ps1
 ```
 
 Add `-EmulatorName "Pura 90"` to include direct MCP screenshot and normalized-touch integration.
@@ -187,16 +187,16 @@ Add `-EmulatorName "Pura 90"` to include direct MCP screenshot and normalized-to
 Scenarios combine tap, swipe, relative wait, screenshot and gesture capture:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd scenario `
-  -ScenarioPath ./tools/harmony-agent-tools/examples/tap-and-capture.json `
+./hdc-agent.cmd scenario `
+  -ScenarioPath ./examples/tap-and-capture.json `
   -Target 127.0.0.1:5555
 ```
 
 Validate without touching a device:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd scenario `
-  -ScenarioPath ./tools/harmony-agent-tools/examples/gesture-frames.json `
+./hdc-agent.cmd scenario `
+  -ScenarioPath ./examples/gesture-frames.json `
   -ValidateOnly
 ```
 
@@ -209,9 +209,9 @@ scenarios are dry-run, declare `displayWidth` and `displayHeight` in the scenari
 Inspect and crop an image:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd image-info -ImagePath ./actual.jpeg
+./hdc-agent.cmd image-info -ImagePath ./actual.jpeg
 
-./tools/harmony-agent-tools/hdc-agent.cmd crop-image `
+./hdc-agent.cmd crop-image `
   -ImagePath ./actual.jpeg -OutputPath ./crop.png `
   -CropX 100 -CropY 200 -CropWidth 600 -CropHeight 400
 ```
@@ -219,7 +219,7 @@ Inspect and crop an image:
 Compare screenshots and emit a red-highlighted difference image:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd compare-images `
+./hdc-agent.cmd compare-images `
   -BaselinePath ./baseline.png -ActualPath ./actual.png `
   -DifferencePath ./difference.png `
   -PixelTolerance 8 -MaxDifferenceRatio 0.01 -MaxMeanError 0.005
@@ -233,13 +233,13 @@ dimensions; crop responsive regions first when the full display size is expected
 Run ArkTS local tests through Hvigor:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd test-local -ProjectRoot . -Module entry
+./hdc-agent.cmd test-local -ProjectRoot . -Module entry
 ```
 
 Build, install and execute the `ohosTest` package:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd test-device `
+./hdc-agent.cmd test-device `
   -ProjectRoot . -EmulatorName "Pura 90" `
   -Bundle com.example.music -Module entry -TestModule entry_test
 ```
@@ -252,14 +252,14 @@ Build, install and execute the `ohosTest` package:
 Build:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd build `
+./hdc-agent.cmd build `
   -ProjectRoot . -Product default -BuildMode debug
 ```
 
 List build products before choosing what to install:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd packages -ProjectRoot .
+./hdc-agent.cmd packages -ProjectRoot .
 ```
 
 Device-test HAPs are excluded by default. Pass `-IncludeTests` when they are needed.
@@ -267,7 +267,7 @@ Device-test HAPs are excluded by default. Pass `-IncludeTests` when they are nee
 Install without uninstalling:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd install `
+./hdc-agent.cmd install `
   -Target 127.0.0.1:5555 `
   -PackagePath ./entry/build/default/outputs/default/entry-default-signed.hap
 ```
@@ -275,7 +275,7 @@ Install without uninstalling:
 Normal launch:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd start `
+./hdc-agent.cmd start `
   -Target 127.0.0.1:5555 `
   -Bundle com.example.music -Ability EntryAbility
 ```
@@ -283,7 +283,7 @@ Normal launch:
 Debug-mode launch:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd start `
+./hdc-agent.cmd start `
   -Target 127.0.0.1:5555 `
   -Bundle com.example.music -Ability EntryAbility -DebugLaunch
 ```
@@ -296,14 +296,14 @@ For 2-in-1 window checks, `start` also accepts `-WindowLeft`, `-WindowTop`, `-Wi
 Stop an application after debug-mode or isolated launch testing:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd stop `
+./hdc-agent.cmd stop `
   -Target 127.0.0.1:5555 -Bundle com.example.music
 ```
 
 Read a bounded application log snapshot:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd logs `
+./hdc-agent.cmd logs `
   -Target 127.0.0.1:5555 -Bundle com.example.music -Level E -Tail 200
 ```
 
@@ -313,7 +313,7 @@ does not expose an unbounded follow mode.
 Build, install and launch in sequence:
 
 ```powershell
-./tools/harmony-agent-tools/hdc-agent.cmd deploy `
+./hdc-agent.cmd deploy `
   -ProjectRoot . `
   -PackagePath ./entry/build/default/outputs/default/entry-default-signed.hap `
   -Target 127.0.0.1:5555 `
@@ -345,11 +345,22 @@ npm run test:mcp:device -- "Pura 90"
 The repository does not modify a personal Codex marketplace or globally install the plugin. That remains an
 explicit consumer choice when this directory is extracted or distributed.
 
-## Portability boundary
+## Use as a Git submodule
 
-> TODO(independent-repository): Extract this directory into a standalone `harmony-agent-tools` Git repository once
-> the CLI and image-return interface stabilize, then consume it from application repositories through a pinned,
-> reviewable version.
+Pin the toolkit in another repository:
+
+```powershell
+git submodule add https://github.com/wbbb0/harmony-agent-tools.git tools/harmony-agent-tools
+git submodule update --init --recursive
+```
+
+From the consumer repository root, invoke it through the submodule path, for example:
+
+```powershell
+./tools/harmony-agent-tools/hdc-agent.cmd doctor -ProjectRoot .
+```
+
+## Portability boundary
 
 Portable core:
 
@@ -363,11 +374,9 @@ Portable core:
 - `scenario.schema.json`
 - generic examples
 
-Still needed before publishing as an independent project:
+Possible future distribution work:
 
-- choose a license and versioning policy;
-- add CI on Windows PowerShell 5.1 and PowerShell 7;
 - add fully mocked process tests in addition to the current smoke and opt-in device integration checks;
 - define support across HDC/OS versions;
 - package the module or publish a signed release artifact;
-- decide whether the standalone distribution ships as a Codex plugin, PowerShell module, npm package, or all three.
+- decide whether future releases also ship as a PowerShell module or npm package.

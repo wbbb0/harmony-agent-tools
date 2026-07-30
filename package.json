@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "description": "MCP adapter for agent-facing HarmonyOS device automation.",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wbbb0/harmony-agent-tools.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wbbb0/harmony-agent-tools/issues"
+  },
+  "homepage": "https://github.com/wbbb0/harmony-agent-tools#readme",
   "engines": {
     "node": ">=20"
   },
@@ -13,7 +22,7 @@
     "test:mcp:device": "node mcp/device-integration.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "4.3.6"
   }
 }
