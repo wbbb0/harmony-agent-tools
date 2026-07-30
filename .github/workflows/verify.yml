@@ -10,11 +10,6 @@ permissions:
 jobs:
   verify:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        shell:
-          - powershell
-          - pwsh
 
     steps:
       - uses: actions/checkout@v4
@@ -26,8 +21,12 @@ jobs:
 
       - run: npm ci
 
-      - name: Verify toolkit
-        shell: ${{ matrix.shell }}
+      - name: Verify with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Verify.ps1
+
+      - name: Verify with PowerShell 7
+        shell: pwsh
         run: ./tests/Verify.ps1
 
       - name: Audit runtime dependencies
