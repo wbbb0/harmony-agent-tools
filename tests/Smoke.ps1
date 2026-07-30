@@ -5,7 +5,10 @@ Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
 $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $toolRoot '..\..'))
+$repositoryRoot = Join-Path $toolRoot 'artifacts\smoke-project'
+$package = Join-Path $repositoryRoot 'entry\build\default\outputs\default\entry-default-signed.hap'
+[void](New-Item -ItemType Directory -Path (Split-Path -Parent $package) -Force)
+[void](New-Item -ItemType File -Path $package -Force)
 $cli = Join-Path $toolRoot 'hdc-agent.cmd'
 
 function Assert-True {
@@ -82,11 +85,10 @@ $build = Invoke-CliJson @(
 )
 Assert-True ($build.action -eq 'build' -and $build.command.dryRun) 'build dry-run failed.'
 
-$packages = Invoke-CliJson @('packages', '-ProjectRoot', $repositoryRoot)
+$packages = @(Invoke-CliJson @('packages', '-ProjectRoot', $repositoryRoot))
 Assert-True ($packages.Count -gt 0 -and $packages[0].path -match '\.hap$') `
   'package discovery failed.'
 
-$package = Join-Path $repositoryRoot 'entry\build\default\outputs\default\entry-default-signed.hap'
 $install = Invoke-CliJson @('install', '-PackagePath', $package, '-DryRun')
 Assert-True ($install.action -eq 'install' -and $install.command.dryRun) 'install dry-run failed.'
 
