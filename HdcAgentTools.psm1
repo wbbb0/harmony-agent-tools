@@ -98,6 +98,34 @@ function Invoke-NativeCommand {
   return $result
 }
 
+function Assert-HarmonyCommandSemantics {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Command,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Operation,
+
+    [Parameter(Mandatory = $true)]
+    [string[]]$FailurePatterns
+  )
+
+  if ($Command.dryRun) {
+    return
+  }
+  $outputText = @($Command.output) -join [Environment]::NewLine
+  foreach ($pattern in $FailurePatterns) {
+    if ($outputText -match $pattern) {
+      $message = "${Operation} reported a semantic failure despite exit code $($Command.exitCode): " +
+        $Command.command
+      if ($outputText.Length -gt 0) {
+        $message += [Environment]::NewLine + $outputText
+      }
+      throw $message
+    }
+  }
+}
+
 function ConvertTo-NativeProcessArgument {
   param(
     [Parameter(Mandatory = $true)]
@@ -437,46 +465,298 @@ function Get-HarmonyDisplay {
 
   $resolvedTarget = Resolve-HarmonyTarget -Target $Target -HdcPath $HdcPath
   $command = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
-    -CommandArguments @('shell', 'hidumper', '-s', 'WindowManagerService', '-a', '-a')
-  $rectangles = @()
-  foreach ($line in $command.output) {
-    foreach ($match in [regex]::Matches(
-      $line,
-      '\[\s*(-?\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s*\]'
-    )) {
-      $width = [int]$match.Groups[3].Value
-      $height = [int]$match.Groups[4].Value
-      if ($width -gt 0 -and $height -gt 0) {
-        $rectangles += [pscustomobject]@{
-          x = [int]$match.Groups[1].Value
-          y = [int]$match.Groups[2].Value
-          width = $width
-          height = $height
-          area = [long]$width * [long]$height
-        }
-      }
-    }
+    -CommandArguments @('shell', 'hidumper', '-s', 'DisplayManagerService', '-a', '-a')
+  $dump = $command.output -join "`n"
+  $displayMatches = [regex]::Matches(
+    $dump,
+    '(?ms)\[DISPLAY INFO\].*?^Width:\s*(\d+)\s*$.*?^Height:\s*(\d+)\s*$'
+  )
+  if ($displayMatches.Count -eq 0) {
+    throw 'DisplayManagerService did not report current display dimensions.'
   }
-
-  if ($rectangles.Count -eq 0) {
-    throw 'WindowManagerService did not report a usable display rectangle.'
-  }
-  $display = @($rectangles | Sort-Object `
-    @{ Expression = { if ($_.x -eq 0 -and $_.y -eq 0) { 1 } else { 0 } }; Descending = $true }, `
-    @{ Expression = 'area'; Descending = $true })[0]
+  $display = $displayMatches[$displayMatches.Count - 1]
+  $width = [int]$display.Groups[1].Value
+  $height = [int]$display.Groups[2].Value
+  $displayBlockStart = $dump.LastIndexOf('[DISPLAY INFO]')
+  $displayBlock = if ($displayBlockStart -ge 0) { $dump.Substring($displayBlockStart) } else { '' }
+  $rotationMatch = [regex]::Match($displayBlock, '(?m)^Rotation:\s*(\d+)\s*$')
+  $rotation = if ($rotationMatch.Success) { [int]$rotationMatch.Groups[1].Value * 90 } else { $null }
   return [pscustomobject]@{
     action = 'display'
     target = $resolvedTarget
-    width = $display.width
-    height = $display.height
-    orientation = if ($display.width -gt $display.height) { 'landscape' } else { 'portrait' }
-    source = 'WindowManagerService'
+    width = $width
+    height = $height
+    orientation = if ($width -gt $height) { 'landscape' } else { 'portrait' }
+    rotation = $rotation
+    source = 'DisplayManagerService'
     command = [pscustomobject]@{
       command = $command.command
       exitCode = $command.exitCode
       durationMs = $command.durationMs
       dryRun = $command.dryRun
     }
+  }
+}
+
+function Set-HarmonyFoldState {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('folded', 'half', 'expanded', 'dual-expanded')]
+    [string]$State,
+
+    [string]$Target = '',
+
+    [string]$HdcPath = 'hdc',
+
+    [switch]$DryRun
+  )
+
+  $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+  $stateFlag = @{
+    folded = '-p'
+    half = '-z'
+    expanded = '-y'
+    'dual-expanded' = '-yy'
+  }[$State]
+  $initialDisplay = if ($DryRun) { $null } else {
+    Get-HarmonyDisplay -Target $resolvedTarget -HdcPath $HdcPath
+  }
+  $command = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
+    -CommandArguments @('shell', 'hidumper', '-s', 'DisplayManagerService', '-a', $stateFlag) `
+    -DryRun:$DryRun
+  Assert-HarmonyCommandSemantics -Command $command -Operation 'Fold-state change' -FailurePatterns @(
+    '(?im)(?:unknown\s+(?:option|command)|not\s+support(?:ed)?|invalid\s+(?:option|argument)|^\s*(?:error|failed|failure)\s*:)'
+  )
+  if (-not $DryRun) {
+    Wait-HarmonyFoldState -Target $resolvedTarget -State $State -HdcPath $HdcPath
+  }
+  $display = if ($DryRun) { $null } else {
+    Wait-HarmonyDisplayStable -Target $resolvedTarget -InitialDisplay $initialDisplay -HdcPath $HdcPath
+  }
+  return [pscustomobject]@{
+    action = 'fold'
+    target = $resolvedTarget
+    state = $State
+    command = [pscustomobject]@{
+      command = $command.command
+      exitCode = $command.exitCode
+      durationMs = $command.durationMs
+      dryRun = $command.dryRun
+    }
+    display = $display
+  }
+}
+
+function Get-HarmonyFoldStateValue {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Target,
+
+    [string]$HdcPath = 'hdc'
+  )
+
+  $command = Invoke-HarmonyHdc -Target $Target -HdcPath $HdcPath `
+    -CommandArguments @('shell', 'hidumper', '-s', 'DisplayManagerService', '-a', '-a')
+  foreach ($line in $command.output) {
+    $match = [regex]::Match($line, 'PhysicalFoldStatus:\s+([A-Z_]+)')
+    if ($match.Success) {
+      return $match.Groups[1].Value
+    }
+  }
+  return ''
+}
+
+function Wait-HarmonyFoldState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Target,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('folded', 'half', 'expanded', 'dual-expanded')]
+    [string]$State,
+
+    [string]$HdcPath = 'hdc',
+
+    [ValidateRange(1000, 10000)]
+    [int]$TimeoutMs = 5000
+  )
+
+  $expected = @{
+    folded = @('FOLDED', 'FOLD')
+    half = @('HALF_FOLD', 'HALF_FOLDED')
+    expanded = @('EXPAND', 'EXPANDED')
+    'dual-expanded' = @('EXPAND', 'EXPANDED')
+  }[$State]
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    Start-Sleep -Milliseconds 250
+    $current = Get-HarmonyFoldStateValue -Target $Target -HdcPath $HdcPath
+    if ($current -in $expected) {
+      $stopwatch.Stop()
+      return
+    }
+  } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMs)
+  $stopwatch.Stop()
+  throw "Fold state did not reach '${State}' within ${TimeoutMs}ms."
+}
+
+function Set-HarmonyRotation {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet(0, 90, 180, 270)]
+    [int]$Rotation,
+
+    [string]$Target = '',
+
+    [string]$HdcPath = 'hdc',
+
+    [switch]$DryRun
+  )
+
+  $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+  $motion = [int]($Rotation / 90)
+  $unlock = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
+    -CommandArguments @('shell', 'hidumper', '-s', 'DisplayManagerService', '-a', '-rotationlock,0') `
+    -DryRun:$DryRun
+  $command = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
+    -CommandArguments @('shell', 'hidumper', '-s', 'DisplayManagerService', '-a', "-motion,$motion") `
+    -DryRun:$DryRun
+  Assert-HarmonyCommandSemantics -Command $unlock -Operation 'Rotation unlock' -FailurePatterns @(
+    '(?im)(?:unknown\s+(?:option|command)|not\s+support(?:ed)?|invalid\s+(?:option|argument)|^\s*(?:error|failed|failure)\s*:)'
+  )
+  Assert-HarmonyCommandSemantics -Command $command -Operation 'Rotation change' -FailurePatterns @(
+    '(?im)(?:unknown\s+(?:option|command)|not\s+support(?:ed)?|invalid\s+(?:option|argument)|^\s*(?:error|failed|failure)\s*:)'
+  )
+  $display = if ($DryRun) { $null } else {
+    Wait-HarmonyRotation -Target $resolvedTarget -Rotation $Rotation -HdcPath $HdcPath
+  }
+  return [pscustomobject]@{
+    action = 'rotate'
+    target = $resolvedTarget
+    rotation = $Rotation
+    unlock = [pscustomobject]@{
+      command = $unlock.command
+      exitCode = $unlock.exitCode
+      durationMs = $unlock.durationMs
+      dryRun = $unlock.dryRun
+    }
+    command = [pscustomobject]@{
+      command = $command.command
+      exitCode = $command.exitCode
+      durationMs = $command.durationMs
+      dryRun = $command.dryRun
+    }
+    display = $display
+  }
+}
+
+function Wait-HarmonyDisplayStable {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Target,
+
+    [Parameter(Mandatory = $true)]
+    [psobject]$InitialDisplay,
+
+    [string]$HdcPath = 'hdc',
+
+    [ValidateRange(500, 10000)]
+    [int]$TimeoutMs = 5000
+  )
+
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $previous = $null
+  $stableSamples = 0
+  $changed = $false
+  do {
+    Start-Sleep -Milliseconds 250
+    $current = Get-HarmonyDisplay -Target $Target -HdcPath $HdcPath
+    if ($current.width -ne $InitialDisplay.width -or $current.height -ne $InitialDisplay.height) {
+      $changed = $true
+    }
+    if ($null -ne $previous -and $current.width -eq $previous.width -and $current.height -eq $previous.height) {
+      $stableSamples += 1
+    } else {
+      $stableSamples = 0
+    }
+    if ($stableSamples -ge 2 -and ($changed -or $stopwatch.ElapsedMilliseconds -ge 750)) {
+      $stopwatch.Stop()
+      return $current
+    }
+    $previous = $current
+  } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMs)
+  $stopwatch.Stop()
+  throw "Display dimensions did not stabilize within ${TimeoutMs}ms."
+}
+
+function Wait-HarmonyRotation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Target,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet(0, 90, 180, 270)]
+    [int]$Rotation,
+
+    [string]$HdcPath = 'hdc',
+
+    [ValidateRange(1000, 10000)]
+    [int]$TimeoutMs = 5000
+  )
+
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $matchingSamples = 0
+  do {
+    Start-Sleep -Milliseconds 250
+    $current = Get-HarmonyDisplay -Target $Target -HdcPath $HdcPath
+    if ($null -ne $current.rotation -and $current.rotation -eq $Rotation) {
+      $matchingSamples += 1
+      if ($matchingSamples -ge 2) {
+        $stopwatch.Stop()
+        return $current
+      }
+    } else {
+      $matchingSamples = 0
+    }
+  } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMs)
+  $stopwatch.Stop()
+  throw "Display rotation did not reach ${Rotation} degrees within ${TimeoutMs}ms."
+}
+
+function Wait-HarmonyDisplay {
+  [CmdletBinding()]
+  param(
+    [string]$Target = '',
+
+    [string]$HdcPath = 'hdc',
+
+    [ValidateRange(1000, 10000)]
+    [int]$TimeoutMs = 5000,
+
+    [switch]$DryRun
+  )
+
+  $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+  if ($DryRun) {
+    return [pscustomobject]@{
+      action = 'waitDisplay'
+      target = $resolvedTarget
+      timeoutMs = $TimeoutMs
+      display = $null
+      dryRun = $true
+    }
+  }
+  $initialDisplay = Get-HarmonyDisplay -Target $resolvedTarget -HdcPath $HdcPath
+  $display = Wait-HarmonyDisplayStable -Target $resolvedTarget -InitialDisplay $initialDisplay `
+    -HdcPath $HdcPath -TimeoutMs $TimeoutMs
+  return [pscustomobject]@{
+    action = 'waitDisplay'
+    target = $resolvedTarget
+    timeoutMs = $TimeoutMs
+    display = $display
+    dryRun = $false
   }
 }
 
@@ -1006,7 +1286,10 @@ function Invoke-HarmonyScenario {
     }
   }
 
-  $supportedActions = @('tap', 'swipe', 'wait', 'screenshot', 'gestureCapture')
+  $supportedActions = @(
+    'display', 'fold', 'rotate', 'waitDisplay',
+    'tap', 'swipe', 'wait', 'screenshot', 'gestureCapture'
+  )
   foreach ($step in $steps) {
     $action = [string](Get-OptionalProperty -Object $step -Name 'action' -DefaultValue '')
     if ($action -notin $supportedActions) {
@@ -1036,6 +1319,48 @@ function Invoke-HarmonyScenario {
     }
 
     switch ($action) {
+      'display' {
+        if ($DryRun) {
+          $event = [pscustomobject]@{
+            action = 'display'
+            target = $resolvedTarget
+            width = if ($null -ne $scenarioDisplay) { $scenarioDisplay.width } else { $null }
+            height = if ($null -ne $scenarioDisplay) { $scenarioDisplay.height } else { $null }
+            source = if ($null -ne $scenarioDisplay) { $scenarioDisplay.source } else { 'dry-run' }
+            dryRun = $true
+          }
+        } else {
+          $event = Get-HarmonyDisplay -Target $resolvedTarget -HdcPath $HdcPath
+          $scenarioDisplay = $event
+        }
+      }
+      'fold' {
+        $state = [string](Get-OptionalProperty $step 'state' '')
+        if ($state -notin @('folded', 'half', 'expanded', 'dual-expanded')) {
+          throw "Scenario fold state must be folded, half, expanded, or dual-expanded. Received: '${state}'."
+        }
+        $event = Set-HarmonyFoldState -State $state -Target $resolvedTarget -HdcPath $HdcPath -DryRun:$DryRun
+        if ($null -ne $event.display) {
+          $scenarioDisplay = $event.display
+        }
+      }
+      'rotate' {
+        $rotation = [int](Get-OptionalProperty $step 'rotation' -1)
+        if ($rotation -notin @(0, 90, 180, 270)) {
+          throw 'Scenario rotation must be 0, 90, 180, or 270.'
+        }
+        $event = Set-HarmonyRotation -Rotation $rotation -Target $resolvedTarget -HdcPath $HdcPath -DryRun:$DryRun
+        if ($null -ne $event.display) {
+          $scenarioDisplay = $event.display
+        }
+      }
+      'waitDisplay' {
+        $event = Wait-HarmonyDisplay -Target $resolvedTarget -HdcPath $HdcPath `
+          -TimeoutMs ([int](Get-OptionalProperty $step 'timeoutMs' 5000)) -DryRun:$DryRun
+        if ($null -ne $event.display) {
+          $scenarioDisplay = $event.display
+        }
+      }
       'tap' {
         $point = Get-HarmonyScenarioPoint -Step $step -XName 'x' -YName 'y' `
           -XRatioName 'xRatio' -YRatioName 'yRatio' -Display ([ref]$scenarioDisplay) `
@@ -1340,6 +1665,9 @@ function Install-HarmonyPackage {
   $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
   $command = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath -DryRun:$DryRun `
     -CommandArguments @('install', '-r', $absolutePackage)
+  Assert-HarmonyCommandSemantics -Command $command -Operation 'Package installation' -FailurePatterns @(
+    '(?im)(?:msg\s*:\s*error\b|failed\s+to\s+install\s+bundle|\binstall(?:ation)?\s+(?:failed|failure)\b)'
+  )
   return [pscustomobject]@{
     action = 'install'
     target = $resolvedTarget
@@ -1398,6 +1726,9 @@ function Start-HarmonyAbility {
   }
   $command = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
     -CommandArguments $arguments -DryRun:$DryRun
+  Assert-HarmonyCommandSemantics -Command $command -Operation 'Ability start' -FailurePatterns @(
+    '(?im)(?:^\s*error(?:\s+code)?\s*:|failed\s+to\s+start\s+ability|the\s+specified\s+ability\s+does\s+not\s+exist)'
+  )
   return [pscustomobject]@{
     action = 'start'
     target = $resolvedTarget
@@ -1555,6 +1886,9 @@ Export-ModuleMember -Function @(
   'Get-DevEcoEmulator',
   'Resolve-DevEcoEmulatorTarget',
   'Get-HarmonyDisplay',
+  'Wait-HarmonyDisplay',
+  'Set-HarmonyFoldState',
+  'Set-HarmonyRotation',
   'ConvertFrom-HarmonyNormalizedPoint',
   'Get-HarmonyAgentHealth',
   'Get-HarmonyPackage',

@@ -170,6 +170,63 @@ server.registerTool(
 );
 
 server.registerTool(
+  "harmony_wait_display",
+  {
+    description: "Wait until HarmonyOS display dimensions settle and return the stable display.",
+    inputSchema: {
+      ...targetSchema,
+      timeoutMs: z.number().int().min(1000).max(10000).default(5000),
+    },
+  },
+  async (input) => {
+    const result = await invokeCli("wait-display", [
+      ...deviceArguments(input),
+      "-TimeoutMs",
+      String(input.timeoutMs),
+    ]);
+    return { content: [resultText(result)] };
+  },
+);
+
+server.registerTool(
+  "harmony_fold",
+  {
+    description: "Set the folding state of a connected HarmonyOS foldable target.",
+    inputSchema: {
+      ...targetSchema,
+      state: z.enum(["folded", "half", "expanded", "dual-expanded"]),
+    },
+  },
+  async (input) => {
+    const result = await invokeCli("fold", [
+      ...deviceArguments(input),
+      "-FoldState",
+      input.state,
+    ]);
+    return { content: [resultText(result)] };
+  },
+);
+
+server.registerTool(
+  "harmony_rotate",
+  {
+    description: "Rotate a connected HarmonyOS target to an absolute clockwise angle.",
+    inputSchema: {
+      ...targetSchema,
+      rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+    },
+  },
+  async (input) => {
+    const result = await invokeCli("rotate", [
+      ...deviceArguments(input),
+      "-Rotation",
+      String(input.rotation),
+    ]);
+    return { content: [resultText(result)] };
+  },
+);
+
+server.registerTool(
   "harmony_screenshot",
   {
     description: "Capture a HarmonyOS display and return the image directly.",

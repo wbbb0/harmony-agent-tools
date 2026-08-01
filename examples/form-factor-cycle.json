@@ -1,0 +1,48 @@
+{
+  "$schema": "../scenario.schema.json",
+  "outputDirectory": "../artifacts/form-factor-cycle",
+  "displayWidth": 1080,
+  "displayHeight": 2444,
+  "steps": [
+    {
+      "action": "fold",
+      "state": "folded"
+    },
+    {
+      "action": "display"
+    },
+    {
+      "action": "tap",
+      "xRatio": 0.08,
+      "yRatio": 0.075
+    },
+    {
+      "action": "screenshot",
+      "name": "folded.jpeg"
+    },
+    {
+      "action": "fold",
+      "state": "expanded"
+    },
+    {
+      "action": "waitDisplay",
+      "timeoutMs": 5000
+    },
+    {
+      "action": "rotate",
+      "rotation": 90
+    },
+    {
+      "action": "screenshot",
+      "name": "expanded-landscape.jpeg"
+    },
+    {
+      "action": "rotate",
+      "rotation": 0
+    },
+    {
+      "action": "waitDisplay",
+      "timeoutMs": 5000
+    }
+  ]
+}

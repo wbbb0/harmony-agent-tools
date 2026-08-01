@@ -26,6 +26,18 @@
       "items": {
         "oneOf": [
           {
+            "$ref": "#/$defs/display"
+          },
+          {
+            "$ref": "#/$defs/fold"
+          },
+          {
+            "$ref": "#/$defs/rotate"
+          },
+          {
+            "$ref": "#/$defs/waitDisplay"
+          },
+          {
             "$ref": "#/$defs/tap"
           },
           {
@@ -56,6 +68,84 @@
           "minimum": 0
         }
       }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "display"
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "fold": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "fold"
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "enum": ["folded", "half", "expanded", "dual-expanded"]
+        }
+      },
+      "required": [
+        "action",
+        "state"
+      ]
+    },
+    "rotate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "rotate"
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rotation": {
+          "enum": [0, 90, 180, 270]
+        }
+      },
+      "required": [
+        "action",
+        "rotation"
+      ]
+    },
+    "waitDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "waitDisplay"
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 10000,
+          "default": 5000
+        }
+      },
+      "required": [
+        "action"
+      ]
     },
     "tap": {
       "allOf": [

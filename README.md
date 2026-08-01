@@ -15,6 +15,7 @@ configuration.
 - wrap build, install, normal launch and debug launch without automatically uninstalling applications;
 - wrap local ArkTS tests and on-device ohosTest execution;
 - expose bounded application logs and machine-readable environment diagnostics;
+- control foldable display state and absolute rotation through DisplayManagerService debug commands;
 - keep project-specific bundle names, abilities, artifact paths and coordinates outside the module.
 
 ## Entry point
@@ -77,6 +78,24 @@ Query the physical target display:
 ```powershell
 ./hdc-agent.cmd display -EmulatorName "Pura 90"
 ```
+
+Wait until repeated display samples agree:
+
+```powershell
+./hdc-agent.cmd wait-display -EmulatorName "Mate X7" -TimeoutMs 5000
+```
+
+Control a foldable emulator and rotate a target:
+
+```powershell
+./hdc-agent.cmd fold -EmulatorName "Mate X7" -FoldState folded
+./hdc-agent.cmd fold -EmulatorName "Mate X7" -FoldState expanded
+./hdc-agent.cmd rotate -EmulatorName "Mate X7" -Rotation 90
+```
+
+Fold states are `folded`, `half`, `expanded`, and `dual-expanded` (the last state is intended for supported
+tri-fold targets). Rotation accepts `0`, `90`, `180`, or `270` degrees clockwise. These commands use the platform
+`DisplayManagerService` debug interface, return the resulting display dimensions, and support `-DryRun`.
 
 ## Touch
 
@@ -184,7 +203,8 @@ Add `-EmulatorName "Pura 90"` to include direct MCP screenshot and normalized-to
 
 ## Scenarios
 
-Scenarios combine tap, swipe, relative wait, screenshot and gesture capture:
+Scenarios combine display queries, fold/rotation changes, display-stability waits, touch input, relative waits,
+screenshots and gesture capture:
 
 ```powershell
 ./hdc-agent.cmd scenario `
@@ -203,6 +223,19 @@ Validate without touching a device:
 `atMs` schedules a step relative to scenario start. A `wait` step waits relative to the preceding step.
 Scenarios may use pixel fields or normalized fields such as `xRatio`, `startXRatio` and `endYRatio`. When normalized
 scenarios are dry-run, declare `displayWidth` and `displayHeight` in the scenario.
+
+Form-factor steps use these shapes:
+
+```json
+{ "action": "display" }
+{ "action": "fold", "state": "folded" }
+{ "action": "rotate", "rotation": 90 }
+{ "action": "waitDisplay", "timeoutMs": 5000 }
+```
+
+After a real fold, rotation, display, or display-wait step, the scenario replaces its cached display dimensions.
+Subsequent normalized coordinates are therefore resolved against the current display instead of stale startup
+dimensions. See `examples/form-factor-cycle.json` for a complete sequence.
 
 ## Image inspection and visual assertions
 
@@ -321,12 +354,17 @@ Build, install and launch in sequence:
 ```
 
 `deploy` stops after the first failed command. It never uninstalls the existing application.
+The install and Ability-start wrappers also inspect HarmonyOS command output because some platform tools return exit
+code 0 while reporting an application-level failure in stdout.
 
 ## Codex plugin and MCP image return
 
 The directory is also a valid Codex plugin. Its MCP server exposes:
 
 - `harmony_display`;
+- `harmony_wait_display`;
+- `harmony_fold`;
+- `harmony_rotate`;
 - `harmony_screenshot`;
 - `harmony_tap`;
 - `harmony_swipe`;

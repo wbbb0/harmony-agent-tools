@@ -5,6 +5,9 @@ param(
     'targets',
     'emulators',
     'display',
+    'wait-display',
+    'fold',
+    'rotate',
     'doctor',
     'tap',
     'swipe',
@@ -31,6 +34,12 @@ param(
   [string]$EmulatorName = '',
   [string]$HdcPath = 'hdc',
   [string]$DevEcoCliPath = 'devecocli',
+  [ValidateSet('folded', 'half', 'expanded', 'dual-expanded')]
+  [string]$FoldState = '',
+  [ValidateSet(0, 90, 180, 270)]
+  [Nullable[int]]$Rotation,
+  [ValidateRange(1000, 10000)]
+  [int]$TimeoutMs = 5000,
 
   [int]$X,
   [int]$Y,
@@ -212,7 +221,7 @@ function Resolve-InputPoint {
 try {
   $PSBoundParametersFromCli = $PSBoundParameters
   $deviceCommands = @(
-    'display', 'tap', 'swipe', 'screenshot', 'gesture-capture', 'scenario',
+    'display', 'wait-display', 'fold', 'rotate', 'tap', 'swipe', 'screenshot', 'gesture-capture', 'scenario',
     'install', 'start', 'stop', 'logs', 'deploy', 'test-device'
   )
   if ($Command -in $deviceCommands -and $EmulatorName.Length -gt 0) {
@@ -238,6 +247,20 @@ try {
         throw "The 'display' command does not support -DryRun."
       }
       $result = Get-HarmonyDisplay -Target $Target -HdcPath $HdcPath
+    }
+    'wait-display' {
+      $result = Wait-HarmonyDisplay -Target $Target -HdcPath $HdcPath `
+        -TimeoutMs $TimeoutMs -DryRun:$DryRun
+    }
+    'fold' {
+      Require-Value -Name 'FoldState' -Value $FoldState
+      $result = Set-HarmonyFoldState -State $FoldState -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+    }
+    'rotate' {
+      if (-not $PSBoundParametersFromCli.ContainsKey('Rotation')) {
+        throw "-Rotation is required for command 'rotate'."
+      }
+      $result = Set-HarmonyRotation -Rotation ([int]$Rotation) -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
     }
     'doctor' {
       $result = Get-HarmonyAgentHealth -ProjectRoot $ProjectRoot -HdcPath $HdcPath `

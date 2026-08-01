@@ -34,6 +34,25 @@ function Invoke-CliJson {
   return ($output -join [Environment]::NewLine) | ConvertFrom-Json
 }
 
+function Invoke-CliFailure {
+  param(
+    [string[]]$Arguments
+  )
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $cli @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  return [pscustomobject]@{
+    exitCode = $exitCode
+    output = $output -join [Environment]::NewLine
+  }
+}
+
 $tap = Invoke-CliJson @('tap', '-X', '100', '-Y', '200', '-DryRun')
 Assert-True ($tap.action -eq 'tap' -and $tap.command.dryRun) 'tap dry-run failed.'
 
@@ -49,6 +68,18 @@ $emulatorTap = Invoke-CliJson @(
 )
 Assert-True ($emulatorTap.target -eq '<emulator:Pura 90>' -and $emulatorTap.command.dryRun) `
   'emulator-name dry-run selection failed.'
+
+$fold = Invoke-CliJson @('fold', '-FoldState', 'expanded', '-EmulatorName', 'Mate X7', '-DryRun')
+Assert-True ($fold.action -eq 'fold' -and $fold.state -eq 'expanded' -and $fold.command.dryRun) `
+  'fold dry-run failed.'
+
+$rotate = Invoke-CliJson @('rotate', '-Rotation', '90', '-EmulatorName', 'Mate X7', '-DryRun')
+Assert-True ($rotate.action -eq 'rotate' -and $rotate.rotation -eq 90 -and $rotate.command.dryRun) `
+  'rotate dry-run failed.'
+
+$waitDisplay = Invoke-CliJson @('wait-display', '-TimeoutMs', '2000', '-DryRun')
+Assert-True ($waitDisplay.action -eq 'waitDisplay' -and $waitDisplay.dryRun) `
+  'wait-display dry-run failed.'
 
 $swipe = Invoke-CliJson @(
   'swipe', '-StartX', '100', '-StartY', '400', '-EndX', '100', '-EndY', '200',
@@ -145,6 +176,52 @@ Assert-True (
   $normalizedScenario.events[1].result.end.x -eq 989
 ) 'normalized scenario dry-run failed.'
 
+$formFactorExample = Join-Path $toolRoot 'examples\form-factor-cycle.json'
+$formFactorValidation = Invoke-CliJson @('scenario', '-ScenarioPath', $formFactorExample, '-ValidateOnly')
+Assert-True ($formFactorValidation.valid -and $formFactorValidation.stepCount -eq 10) `
+  'form-factor scenario validation failed.'
+$formFactorScenario = Invoke-CliJson @(
+  'scenario', '-ScenarioPath', $formFactorExample,
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\form-factor-smoke'), '-DryRun'
+)
+Assert-True (
+  $formFactorScenario.events.Count -eq 10 -and
+  $formFactorScenario.events[0].result.action -eq 'fold' -and
+  $formFactorScenario.events[5].result.action -eq 'waitDisplay'
+) 'form-factor scenario dry-run failed.'
+
+$fakeHdc = Join-Path $toolRoot 'artifacts\fake-hdc.cmd'
+@'
+@echo off
+if "%1"=="list" (
+  echo fake-target TCP Connected fake-device
+  exit /b 0
+)
+if "%3"=="install" (
+  echo [Info]App install path:fake.hap msg:error: failed to install bundle. code:9568332
+  exit /b 0
+)
+if "%4"=="aa" (
+  echo error: failed to start ability.
+  echo Error Code:10104001 Error Message:The specified ability does not exist
+  exit /b 0
+)
+exit /b 0
+'@ | Set-Content -LiteralPath $fakeHdc -Encoding Ascii
+$semanticInstall = Invoke-CliFailure @(
+  'install', '-Target', 'fake-target', '-HdcPath', $fakeHdc, '-PackagePath', $package
+)
+Assert-True (
+  $semanticInstall.exitCode -ne 0 -and $semanticInstall.output -match 'semantic failure'
+) 'install semantic failure was not detected.'
+$semanticStart = Invoke-CliFailure @(
+  'start', '-Target', 'fake-target', '-HdcPath', $fakeHdc,
+  '-Bundle', 'com.example.missing', '-Ability', 'MissingAbility'
+)
+Assert-True (
+  $semanticStart.exitCode -ne 0 -and $semanticStart.output -match 'semantic failure'
+) 'ability-start semantic failure was not detected.'
+
 Add-Type -AssemblyName System.Drawing
 $imageDirectory = Join-Path $toolRoot 'artifacts\image-smoke'
 [void](New-Item -ItemType Directory -Path $imageDirectory -Force)
@@ -228,6 +305,6 @@ Assert-True (($invalidOutput -join [Environment]::NewLine) -match '\.jpg or \.jp
 
 [pscustomobject]@{
   result = 'PASS'
-  checks = 25
+  checks = 32
   deviceRequired = $false
 } | ConvertTo-Json
