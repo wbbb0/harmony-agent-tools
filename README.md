@@ -269,6 +269,23 @@ Run ArkTS local tests through Hvigor:
 ./hdc-agent.cmd test-local -ProjectRoot . -Module entry
 ```
 
+`-HvigorPath` accepts an Hvigor `.bat`, `.cmd`, `.exe`, extensionless executable, or the JavaScript
+`hvigorw.js` wrapper. JavaScript wrappers are never launched through Windows file association: the tool resolves a
+Node executable and runs `node.exe <hvigorw.js> <arguments>`. Resolution prefers DevEco Studio's bundled
+`tools\node\node.exe` next to the Hvigor installation, then `NODE_HOME`, then `node.exe`/`node` on `PATH`. Use
+`-HvigorNodePath <node.exe>` to select Node explicitly. Other Hvigor file types are rejected before launch.
+
+For example, a versioned DevEco Studio installation can be selected directly:
+
+```powershell
+./hdc-agent.cmd test-local `
+  -ProjectRoot . `
+  -HvigorPath 'C:\Program Files\Huawei\DevEco Studio 24\tools\hvigor\bin\hvigorw.js'
+```
+
+`-DryRun` performs the same resolution and reports the actual process and complete argument list without starting
+Hvigor, so a JavaScript wrapper is shown as `node.exe "...\hvigorw.js" test ...`.
+
 Build, install and execute the `ohosTest` package:
 
 ```powershell
@@ -279,6 +296,7 @@ Build, install and execute the `ohosTest` package:
 
 `test-device` installs with replacement and never uninstalls. Use `-SkipBuild` to run existing signed HAPs, or pass
 `-MainPackagePath` and `-TestPackagePath` when artifact names differ from the standard layout.
+Its build phase uses the same `-HvigorPath` and `-HvigorNodePath` resolution rules as `test-local`.
 
 ## Build, install and launch
 

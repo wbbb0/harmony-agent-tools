@@ -84,6 +84,7 @@ param(
   [string]$ProjectRoot = '',
   [string]$Product = 'default',
   [string]$HvigorPath = '',
+  [string]$HvigorNodePath = '',
   [string]$SdkHome = '',
   [ValidateSet('debug', 'release')]
   [string]$BuildMode = 'debug',
@@ -363,7 +364,8 @@ try {
       Require-Value -Name 'ProjectRoot' -Value $ProjectRoot
       $testModuleName = if ($Module.Length -gt 0) { $Module } else { 'entry' }
       $result = Invoke-HarmonyLocalTest -ProjectRoot $ProjectRoot -Module $testModuleName `
-        -Product $Product -HvigorPath $HvigorPath -SdkHome $SdkHome -DryRun:$DryRun
+        -Product $Product -HvigorPath $HvigorPath -HvigorNodePath $HvigorNodePath `
+        -SdkHome $SdkHome -DryRun:$DryRun
     }
     'test-device' {
       Require-Value -Name 'ProjectRoot' -Value $ProjectRoot
@@ -381,6 +383,7 @@ try {
         Target = $Target
         HdcPath = $HdcPath
         HvigorPath = $HvigorPath
+        HvigorNodePath = $HvigorNodePath
         SdkHome = $SdkHome
         TestTimeoutMs = $TestTimeoutMs
         WaitSeconds = $WaitSeconds

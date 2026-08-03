@@ -9,9 +9,9 @@ function ConvertTo-AgentCommandDisplay {
     [string[]]$ArgumentList
   )
 
-  return (@($FilePath) + @($ArgumentList | ForEach-Object {
+  return (@($FilePath) + @($ArgumentList) | ForEach-Object {
     if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
-  })) -join ' '
+  }) -join ' '
 }
 
 function Invoke-AgentNativeCommand {
@@ -83,27 +83,145 @@ function Invoke-AgentNativeCommand {
   return $result
 }
 
-function Resolve-HvigorWrapper {
+function Resolve-AgentExecutable {
   param(
-    [string]$HvigorPath = ''
+    [Parameter(Mandatory = $true)]
+    [string]$Value,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Description
   )
 
-  if ($HvigorPath.Length -gt 0) {
-    $absolutePath = [System.IO.Path]::GetFullPath($HvigorPath)
-    if (-not (Test-Path -LiteralPath $absolutePath -PathType Leaf)) {
-      throw "Hvigor wrapper does not exist: ${absolutePath}"
-    }
-    return $absolutePath
+  if (Test-Path -LiteralPath $Value -PathType Leaf) {
+    return [System.IO.Path]::GetFullPath($Value)
   }
-  $command = Get-Command 'hvigorw' -ErrorAction SilentlyContinue
-  if ($null -ne $command) {
+  $command = Get-Command $Value -ErrorAction SilentlyContinue
+  if ($null -ne $command -and $command.Source) {
     return $command.Source
   }
-  $defaultPath = 'C:\Program Files\Huawei\DevEco Studio\tools\hvigor\bin\hvigorw.bat'
-  if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
-    return $defaultPath
+  throw "${Description} was not found: ${Value}"
+}
+
+function Resolve-HvigorNodeExecutable {
+  param(
+    [string]$HvigorScriptPath,
+    [string]$HvigorNodePath = ''
+  )
+
+  if ($HvigorNodePath.Length -gt 0) {
+    $resolvedNode = Resolve-AgentExecutable -Value $HvigorNodePath `
+      -Description 'Hvigor Node executable'
+    $nodeExtension = [System.IO.Path]::GetExtension($resolvedNode).ToLowerInvariant()
+    if ($nodeExtension -notin @('', '.exe')) {
+      throw "Unsupported Node executable file type '${nodeExtension}': ${resolvedNode}. " +
+        'Pass node.exe on Windows or an extensionless Node executable.'
+    }
+    return $resolvedNode
   }
-  throw 'Hvigor wrapper was not found. Pass -HvigorPath explicitly.'
+
+  $scriptDirectory = Split-Path -Parent $HvigorScriptPath
+  $bundledNode = [System.IO.Path]::GetFullPath(
+    (Join-Path $scriptDirectory '..\..\node\node.exe')
+  )
+  if (Test-Path -LiteralPath $bundledNode -PathType Leaf) {
+    return $bundledNode
+  }
+
+  $nodeHome = [Environment]::GetEnvironmentVariable('NODE_HOME')
+  if ($nodeHome) {
+    $nodeHomeExecutable = Join-Path $nodeHome 'node.exe'
+    if (Test-Path -LiteralPath $nodeHomeExecutable -PathType Leaf) {
+      return [System.IO.Path]::GetFullPath($nodeHomeExecutable)
+    }
+  }
+
+  foreach ($commandName in @('node.exe', 'node')) {
+    $command = Get-Command $commandName -ErrorAction SilentlyContinue
+    if ($null -ne $command -and $command.Source) {
+      return $command.Source
+    }
+  }
+  throw 'Node.js was not found for the Hvigor JavaScript wrapper. Pass -HvigorNodePath explicitly.'
+}
+
+function Resolve-HvigorCommand {
+  param(
+    [string]$HvigorPath = '',
+    [string]$HvigorNodePath = ''
+  )
+
+  $resolvedHvigorPath = $null
+  if ($HvigorPath.Length -gt 0) {
+    $resolvedHvigorPath = Resolve-AgentExecutable -Value $HvigorPath `
+      -Description 'Hvigor wrapper'
+  } else {
+    $command = Get-Command 'hvigorw' -ErrorAction SilentlyContinue
+    if ($null -ne $command -and $command.Source) {
+      $resolvedHvigorPath = $command.Source
+    }
+  }
+
+  if ($null -eq $resolvedHvigorPath) {
+    $defaultPaths = @(
+      'C:\Program Files\Huawei\DevEco Studio\tools\hvigor\bin\hvigorw.bat'
+    )
+    $versionedStudioRoots = @(Get-ChildItem -LiteralPath 'C:\Program Files\Huawei' `
+      -Directory -Filter 'DevEco Studio *' -ErrorAction SilentlyContinue |
+      Sort-Object -Property Name -Descending)
+    foreach ($studioRoot in $versionedStudioRoots) {
+      $defaultPaths += Join-Path $studioRoot.FullName 'tools\hvigor\bin\hvigorw.bat'
+    }
+    foreach ($defaultPath in $defaultPaths) {
+      if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
+        $resolvedHvigorPath = [System.IO.Path]::GetFullPath($defaultPath)
+        break
+      }
+    }
+  }
+  if ($null -eq $resolvedHvigorPath) {
+    throw 'Hvigor wrapper was not found. Pass -HvigorPath explicitly.'
+  }
+
+  $extension = [System.IO.Path]::GetExtension($resolvedHvigorPath).ToLowerInvariant()
+  if ($extension -eq '.js') {
+    $nodeExecutable = Resolve-HvigorNodeExecutable -HvigorScriptPath $resolvedHvigorPath `
+      -HvigorNodePath $HvigorNodePath
+    return [pscustomobject]@{
+      filePath = $nodeExecutable
+      argumentPrefix = @($resolvedHvigorPath)
+      hvigorPath = $resolvedHvigorPath
+      kind = 'javascript'
+    }
+  }
+  if ($extension -notin @('', '.bat', '.cmd', '.exe')) {
+    throw "Unsupported Hvigor wrapper file type '${extension}': ${resolvedHvigorPath}. " +
+      'Supported forms are .bat, .cmd, .exe, extensionless executables, and .js.'
+  }
+  return [pscustomobject]@{
+    filePath = $resolvedHvigorPath
+    argumentPrefix = @()
+    hvigorPath = $resolvedHvigorPath
+    kind = 'wrapper'
+  }
+}
+
+function Invoke-HvigorCommand {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Command,
+
+    [string[]]$ArgumentList = @(),
+
+    [string]$WorkingDirectory = '',
+
+    [hashtable]$Environment = @{},
+
+    [switch]$DryRun
+  )
+
+  $allArguments = @($Command.argumentPrefix) + @($ArgumentList)
+  return Invoke-AgentNativeCommand -FilePath $Command.filePath -ArgumentList $allArguments `
+    -WorkingDirectory $WorkingDirectory -Environment $Environment -DryRun:$DryRun
 }
 
 function Resolve-DevEcoSdkHome {
@@ -140,6 +258,8 @@ function Invoke-HarmonyLocalTest {
 
     [string]$HvigorPath = '',
 
+    [string]$HvigorNodePath = '',
+
     [string]$SdkHome = '',
 
     [switch]$DryRun
@@ -149,11 +269,8 @@ function Invoke-HarmonyLocalTest {
   if (-not $DryRun -and -not (Test-Path -LiteralPath $absoluteRoot -PathType Container)) {
     throw "Project root does not exist: ${absoluteRoot}"
   }
-  $wrapper = if ($DryRun -and $HvigorPath.Length -eq 0) {
-    'hvigorw'
-  } else {
-    Resolve-HvigorWrapper -HvigorPath $HvigorPath
-  }
+  $hvigorCommand = Resolve-HvigorCommand -HvigorPath $HvigorPath `
+    -HvigorNodePath $HvigorNodePath
   $resolvedSdkHome = if ($DryRun -and $SdkHome.Length -eq 0) {
     '<DEVECO_SDK_HOME>'
   } else {
@@ -166,7 +283,7 @@ function Invoke-HarmonyLocalTest {
     '-p', "module=${Module}@default",
     '--no-daemon'
   )
-  $command = Invoke-AgentNativeCommand -FilePath $wrapper -ArgumentList $arguments `
+  $command = Invoke-HvigorCommand -Command $hvigorCommand -ArgumentList $arguments `
     -WorkingDirectory $absoluteRoot -Environment @{ DEVECO_SDK_HOME = $resolvedSdkHome } `
     -DryRun:$DryRun
   return [pscustomobject]@{
@@ -206,6 +323,8 @@ function Invoke-HarmonyDeviceTest {
 
     [string]$HvigorPath = '',
 
+    [string]$HvigorNodePath = '',
+
     [string]$SdkHome = '',
 
     [ValidateRange(1000, 3600000)]
@@ -228,17 +347,14 @@ function Invoke-HarmonyDeviceTest {
 
   $build = $null
   if (-not $SkipBuild) {
-    $wrapper = if ($DryRun -and $HvigorPath.Length -eq 0) {
-      'hvigorw'
-    } else {
-      Resolve-HvigorWrapper -HvigorPath $HvigorPath
-    }
+    $hvigorCommand = Resolve-HvigorCommand -HvigorPath $HvigorPath `
+      -HvigorNodePath $HvigorNodePath
     $resolvedSdkHome = if ($DryRun -and $SdkHome.Length -eq 0) {
       '<DEVECO_SDK_HOME>'
     } else {
       Resolve-DevEcoSdkHome -SdkHome $SdkHome
     }
-    $buildCommand = Invoke-AgentNativeCommand -FilePath $wrapper -ArgumentList @(
+    $buildCommand = Invoke-HvigorCommand -Command $hvigorCommand -ArgumentList @(
       'onDeviceTest',
       '--mode', 'module',
       '-p', "product=${Product}",

@@ -9,6 +9,26 @@ $repositoryRoot = Join-Path $toolRoot 'artifacts\smoke-project'
 $package = Join-Path $repositoryRoot 'entry\build\default\outputs\default\entry-default-signed.hap'
 [void](New-Item -ItemType Directory -Path (Split-Path -Parent $package) -Force)
 [void](New-Item -ItemType File -Path $package -Force)
+$hvigorFixtureRoot = Join-Path $toolRoot 'artifacts\hvigor smoke'
+[void](New-Item -ItemType Directory -Path $hvigorFixtureRoot -Force)
+$defaultHvigorPath = Join-Path $hvigorFixtureRoot 'hvigorw.bat'
+$explicitHvigorPath = Join-Path $hvigorFixtureRoot 'explicit-hvigorw.bat'
+$javascriptHvigorPath = Join-Path $hvigorFixtureRoot `
+  'DevEco Studio\tools\hvigor\bin\hvigorw.js'
+$bundledNodePath = Join-Path $hvigorFixtureRoot 'DevEco Studio\tools\node\node.exe'
+$explicitNodePath = Join-Path $hvigorFixtureRoot 'custom node\node.exe'
+$unsupportedHvigorPath = Join-Path $hvigorFixtureRoot 'hvigorw.txt'
+foreach ($fixturePath in @(
+  $defaultHvigorPath,
+  $explicitHvigorPath,
+  $javascriptHvigorPath,
+  $bundledNodePath,
+  $explicitNodePath,
+  $unsupportedHvigorPath
+)) {
+  [void](New-Item -ItemType Directory -Path (Split-Path -Parent $fixturePath) -Force)
+  [void](New-Item -ItemType File -Path $fixturePath -Force)
+}
 $cli = Join-Path $toolRoot 'hdc-agent.cmd'
 
 function Assert-True {
@@ -144,16 +164,68 @@ $deploy = Invoke-CliJson @(
 )
 Assert-True ($deploy.action -eq 'deploy' -and $deploy.dryRun) 'deploy dry-run failed.'
 
-$localTest = Invoke-CliJson @('test-local', '-ProjectRoot', $repositoryRoot, '-DryRun')
-Assert-True ($localTest.action -eq 'localTest' -and $localTest.command.dryRun) `
-  'local test dry-run failed.'
+$originalPath = $env:PATH
+try {
+  $env:PATH = "${hvigorFixtureRoot};${originalPath}"
+  $localTest = Invoke-CliJson @('test-local', '-ProjectRoot', $repositoryRoot, '-DryRun')
+} finally {
+  $env:PATH = $originalPath
+}
+Assert-True (
+  $localTest.action -eq 'localTest' -and
+  $localTest.command.dryRun -and
+  $localTest.command.command.StartsWith('"' + $defaultHvigorPath + '"')
+) 'local test default Hvigor wrapper dry-run failed.'
+
+$explicitWrapperLocalTest = Invoke-CliJson @(
+  'test-local', '-ProjectRoot', $repositoryRoot,
+  '-HvigorPath', $explicitHvigorPath, '-DryRun'
+)
+Assert-True ($explicitWrapperLocalTest.command.command.StartsWith('"' + $explicitHvigorPath + '"')) `
+  'local test explicit Hvigor wrapper dry-run failed.'
+
+$javascriptLocalTest = Invoke-CliJson @(
+  'test-local', '-ProjectRoot', $repositoryRoot,
+  '-HvigorPath', $javascriptHvigorPath, '-DryRun'
+)
+$expectedJavascriptPrefix = '"' + $bundledNodePath + '" "' + $javascriptHvigorPath + '" test'
+Assert-True ($javascriptLocalTest.command.command.StartsWith($expectedJavascriptPrefix)) `
+  'local test JavaScript Hvigor wrapper did not use the bundled Node executable.'
+
+$explicitNodeLocalTest = Invoke-CliJson @(
+  'test-local', '-ProjectRoot', $repositoryRoot,
+  '-HvigorPath', $javascriptHvigorPath, '-HvigorNodePath', $explicitNodePath, '-DryRun'
+)
+Assert-True ($explicitNodeLocalTest.command.command.StartsWith(
+  '"' + $explicitNodePath + '" "' + $javascriptHvigorPath + '" test'
+)) 'local test JavaScript Hvigor wrapper did not honor -HvigorNodePath.'
+
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $unsupportedHvigorOutput = @(
+    & $cli test-local -ProjectRoot $repositoryRoot `
+      -HvigorPath $unsupportedHvigorPath -DryRun 2>&1
+  )
+  $unsupportedHvigorExitCode = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $previousErrorActionPreference
+}
+Assert-True ($unsupportedHvigorExitCode -ne 0) 'Unsupported Hvigor file type should fail.'
+Assert-True (($unsupportedHvigorOutput -join [Environment]::NewLine) -match 'Unsupported Hvigor') `
+  'Unsupported Hvigor file type failure was not explained.'
 
 $deviceTest = Invoke-CliJson @(
   'test-device', '-ProjectRoot', $repositoryRoot, '-Bundle', 'com.example.app',
-  '-SkipBuild', '-DryRun'
+  '-HvigorPath', $javascriptHvigorPath, '-DryRun'
 )
-Assert-True ($deviceTest.action -eq 'deviceTest' -and $deviceTest.test.dryRun) `
-  'device test dry-run failed.'
+Assert-True (
+  $deviceTest.action -eq 'deviceTest' -and
+  $deviceTest.build.command.command.StartsWith(
+    '"' + $bundledNodePath + '" "' + $javascriptHvigorPath + '" onDeviceTest'
+  ) -and
+  $deviceTest.test.dryRun
+) 'device test did not share JavaScript Hvigor command resolution.'
 
 $example = Join-Path $toolRoot 'examples\tap-and-capture.json'
 $validation = Invoke-CliJson @('scenario', '-ScenarioPath', $example, '-ValidateOnly')
@@ -305,6 +377,6 @@ Assert-True (($invalidOutput -join [Environment]::NewLine) -match '\.jpg or \.jp
 
 [pscustomobject]@{
   result = 'PASS'
-  checks = 32
+  checks = 37
   deviceRequired = $false
 } | ConvertTo-Json
