@@ -6,13 +6,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const emulatorName = process.argv[2] || "Pura 90";
+const childEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(([, value]) => typeof value === "string"),
+);
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(directory, "server.mjs")],
+  env: childEnvironment,
 });
 const client = new Client({
   name: "harmony-agent-tools-device-integration",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 try {

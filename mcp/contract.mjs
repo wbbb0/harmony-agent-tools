@@ -72,6 +72,10 @@ try {
   const environment = await client.callTool({ name: "harmony_inspect", arguments: { scope: "environment" } });
   assert.ok(JSON.stringify(environment.structuredContent).length < 2000); checks += 1;
   assert.ok(calls.find((item) => item.command === "doctor").args.includes("-HdcPath")); checks += 1;
+  const devices = await client.callTool({ name: "harmony_inspect", arguments: { scope: "device" } });
+  assert.equal(devices.isError, undefined); checks += 1;
+  assert.ok(calls.find((item) => item.command === "targets").args.includes("-HdcPath")); checks += 1;
+  assert.ok(calls.find((item) => item.command === "emulators").args.includes("-HdcPath")); checks += 1;
   const escaped = await client.callTool({ name: "harmony_inspect", arguments: { scope: "project", projectRoot: escapingRoot } });
   assert.equal(escaped.isError, true); checks += 1;
   const build = await client.callTool({ name: "harmony_project_run", arguments: { operation: "build", projectRoot } });
@@ -99,6 +103,7 @@ try {
   assert.equal(trace.structuredContent.warnings.length, 1); checks += 1;
   const traceCall = calls.find((item) => item.command === "trace-scenario");
   assert.equal(traceCall.args.filter((item) => item === "-OutputDirectory").length, 1); checks += 1;
+  assert.equal(traceCall.args.filter((item) => item === "-RecordDurationMs").length, 1); checks += 1;
   assert.equal(traceCall.args[traceCall.args.indexOf("-RecordDurationMs") + 1], "1700"); checks += 1;
   const tracedScenario = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(traceCall.args[traceCall.args.indexOf("-ScenarioPath") + 1], "utf8")));
   assert.equal(tracedScenario.steps[0].milliseconds, 900); checks += 1;

@@ -45,6 +45,10 @@ function deviceArguments(input) {
   return args;
 }
 
+function configuredHdcArguments() {
+  return process.env.HDC_PATH ? ["-HdcPath", process.env.HDC_PATH] : [];
+}
+
 function tailText(value, max = 6000) {
   const text = String(value || "").trim();
   return text.length <= max ? text : `…${text.slice(-max)}`;
@@ -208,8 +212,8 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
       if (checks.truncated) warnings.push("Environment checks were truncated to 8 entries.");
     }
     if (["device", "all"].includes(input.scope)) {
-      const targets = compactArray(await invoke("targets", [], { runId: id }), 8, (item) => ({ target: item.target || item.id, state: item.state, model: item.model }));
-      const emulators = compactArray(await invoke("emulators", [], { runId: id }), 8, (item) => ({ name: item.name, target: item.target, state: item.state }));
+      const targets = compactArray(await invoke("targets", configuredHdcArguments(), { runId: id }), 8, (item) => ({ target: item.target || item.id, state: item.state, model: item.model }));
+      const emulators = compactArray(await invoke("emulators", configuredHdcArguments(), { runId: id }), 8, (item) => ({ name: item.name, target: item.target, state: item.state }));
       data.targets = targets.values;
       data.emulators = emulators.values;
       if (targets.truncated || emulators.truncated) warnings.push("Device candidates were truncated to 8 entries.");
@@ -277,7 +281,7 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
         if (input.capture.frameCount !== undefined && input.capture.intervalMs !== undefined) throw new Error("capture.frameCount and capture.intervalMs are mutually exclusive.");
         if (input.capture.mode === "checkpoints" && input.capture.atMs.length === 0) throw new Error("capture.atMs requires at least one checkpoint.");
         const sheetPath = ["contact-sheet", "both"].includes(input.capture.presentation) ? path.join(directory, "trace-contact-sheet.jpg") : "";
-        raw = await invoke("trace-scenario", [...scenarioArgs, "-RecordDurationMs", String(durationMs), ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath)], { runId: id });
+        raw = await invoke("trace-scenario", [...scenarioArgs, ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath)], { runId: id });
         const frames = raw.frames || [];
         if (raw.manifestPath) artifacts.push({ kind: "manifest", path: raw.manifestPath, role: "frames" });
         if (frames.length > 0) artifacts.push({ kind: "directory", path: path.dirname(frames[0].path), role: "original-frames" });
