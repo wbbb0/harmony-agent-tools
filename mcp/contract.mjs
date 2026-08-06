@@ -18,6 +18,8 @@ await mkdir(escapingRoot, { recursive: true });
 await writeFile(path.join(escapingRoot, "build-profile.json5"), `{ app: { products: [{ name: 'default' }] }, modules: [{ name: 'outside', srcPath: '..' }] }`);
 const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const calls = [];
+const previousHdcPath = process.env.HDC_PATH;
+process.env.HDC_PATH = "C:/fake/hdc.exe";
 async function fakeInvoke(command, args) {
   calls.push({ command, args });
   if (command === "doctor") return { action: "doctor", healthy: true, checks: Array.from({ length: 40 }, (_, index) => ({ name: `check-${index}`, status: "pass", detail: "x".repeat(500) })) };
@@ -69,6 +71,7 @@ try {
   assert.equal(inspect.structuredContent.data.project.bundle, "com.example.contract"); checks += 1;
   const environment = await client.callTool({ name: "harmony_inspect", arguments: { scope: "environment" } });
   assert.ok(JSON.stringify(environment.structuredContent).length < 2000); checks += 1;
+  assert.ok(calls.find((item) => item.command === "doctor").args.includes("-HdcPath")); checks += 1;
   const escaped = await client.callTool({ name: "harmony_inspect", arguments: { scope: "project", projectRoot: escapingRoot } });
   assert.equal(escaped.isError, true); checks += 1;
   const build = await client.callTool({ name: "harmony_project_run", arguments: { operation: "build", projectRoot } });
@@ -120,5 +123,7 @@ try {
 } finally {
   await client.close();
   await server.close();
+  if (previousHdcPath === undefined) delete process.env.HDC_PATH;
+  else process.env.HDC_PATH = previousHdcPath;
 }
 process.stdout.write(`${JSON.stringify({ result: "PASS", checks })}\n`);

@@ -199,7 +199,10 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
     const data = {};
     const warnings = [];
     if (["environment", "all"].includes(input.scope)) {
-      const health = await invoke("doctor", input.projectRoot ? ["-ProjectRoot", path.resolve(input.projectRoot)] : [], { runId: id });
+      const healthArguments = [];
+      if (input.projectRoot) healthArguments.push("-ProjectRoot", path.resolve(input.projectRoot));
+      if (process.env.HDC_PATH) healthArguments.push("-HdcPath", process.env.HDC_PATH);
+      const health = await invoke("doctor", healthArguments, { runId: id });
       const checks = compactArray(health.checks, 8, (item) => ({ name: item.name, status: item.status, detail: tailText(item.detail || item.message, 80) }));
       data.health = { healthy: health.healthy ?? null, checks: checks.values };
       if (checks.truncated) warnings.push("Environment checks were truncated to 8 entries.");
