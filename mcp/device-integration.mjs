@@ -46,6 +46,31 @@ try {
     `Normalized tap response did not include image content: ${JSON.stringify(tapResult)}`,
   );
   assert.equal(tapImage.mimeType, "image/jpeg");
+  const traceResult = await client.callTool({
+    name: "harmony_device_run",
+    arguments: {
+      emulatorName,
+      steps: [{ action: "wait", milliseconds: 600 }],
+      durationMs: 900,
+      capture: {
+        mode: "interval",
+        frameCount: 3,
+        before: true,
+        maxFrames: 4,
+        presentation: "contact-sheet",
+      },
+    },
+  });
+  const traceImage = traceResult.content.find((item) => item.type === "image");
+  assert.ok(
+    traceImage,
+    `MCP trace response did not include a contact sheet: ${JSON.stringify(traceResult)}`,
+  );
+  assert.equal(traceResult.structuredContent.data.captureMode, "interval");
+  assert.ok(
+    traceResult.structuredContent.artifacts.some((item) => item.role === "frames"),
+    "MCP trace response did not retain a frame manifest.",
+  );
   process.stdout.write(
     `${JSON.stringify({
       result: "PASS",
@@ -53,6 +78,9 @@ try {
       mimeType: image.mimeType,
       base64Bytes: image.data.length,
       normalizedTapImageBytes: tapImage.data.length,
+      traceContactSheetBytes: traceImage.data.length,
+      traceFrameCount: traceResult.structuredContent.data.frameCount,
+      traceDroppedFrames: traceResult.structuredContent.data.droppedFrames,
     })}\n`,
   );
 } finally {
