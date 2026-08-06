@@ -1,6 +1,6 @@
 {
   "name": "harmony-agent-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Harmony Agent Tools plugin",
   "author": {
     "name": "wbbb0"
@@ -8,8 +8,8 @@
   "keywords": ["HarmonyOS", "HDC", "device automation", "screenshots"],
   "interface": {
     "displayName": "Harmony Agent Tools",
-    "shortDescription": "Control HarmonyOS targets and return screenshots.",
-    "longDescription": "Agent-facing HarmonyOS device automation for normalized touch input, timed screenshots, visual comparisons, build, deploy and tests.",
+    "shortDescription": "Run compact HarmonyOS device and project workflows.",
+    "longDescription": "Token-efficient HarmonyOS inspection, interaction traces, screenshots, visual comparisons, build, deploy and tests.",
     "developerName": "wbbb0",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Write"],

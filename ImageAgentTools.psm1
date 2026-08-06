@@ -384,9 +384,194 @@ function Assert-AgentImage {
   return $comparison
 }
 
+function New-AgentContactSheet {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$ImagePath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputPath,
+
+    [string[]]$Label = @(),
+
+    [ValidateRange(0, 12)]
+    [int]$Columns = 0,
+
+    [ValidateRange(64, 1024)]
+    [int]$MaxCellWidth = 360,
+
+    [ValidateRange(64, 2048)]
+    [int]$MaxCellHeight = 720,
+
+    [ValidateRange(512, 8192)]
+    [int]$MaxSheetWidth = 4096,
+
+    [ValidateRange(512, 8192)]
+    [int]$MaxSheetHeight = 4096
+  )
+
+  $paths = @($ImagePath)
+  if ($paths.Count -eq 0) {
+    throw 'Contact sheet requires at least one image.'
+  }
+  if ($paths.Count -gt 60) {
+    throw "Contact sheet supports at most 60 images. Received: $($paths.Count)."
+  }
+  if ($Label.Count -gt 0 -and $Label.Count -ne $paths.Count) {
+    throw 'Contact sheet labels must be empty or match the image count.'
+  }
+
+  $absolutePaths = @($paths | ForEach-Object {
+    Resolve-AgentImagePath -Path $_ -MustExist
+  })
+  $absoluteOutput = Resolve-AgentImagePath -Path $OutputPath
+  if ([System.IO.Path]::GetExtension($absoluteOutput).ToLowerInvariant() -notin @('.jpg', '.jpeg')) {
+    throw "Contact sheet output must use .jpg or .jpeg: ${absoluteOutput}"
+  }
+  [void](New-Item -ItemType Directory -Path (Split-Path -Parent $absoluteOutput) -Force)
+
+  $images = @()
+  try {
+    foreach ($path in $absolutePaths) {
+      $images += [System.Drawing.Image]::FromFile($path)
+    }
+    $resolvedColumns = if ($Columns -gt 0) {
+      [Math]::Min($Columns, $images.Count)
+    } else {
+      [Math]::Min(4, [Math]::Max(1, [int][Math]::Ceiling([Math]::Sqrt($images.Count))))
+    }
+    $rows = [int][Math]::Ceiling($images.Count / [double]$resolvedColumns)
+    $padding = 8
+    $labelHeight = 28
+    $widthBudget = [Math]::Max(1, [int][Math]::Floor(($MaxSheetWidth - $padding) / [double]$resolvedColumns) - $padding)
+    $heightBudget = [Math]::Max(1, [int][Math]::Floor(($MaxSheetHeight - $padding) / [double]$rows) - $labelHeight - $padding)
+    $cellWidth = [Math]::Min($widthBudget, [Math]::Min($MaxCellWidth, [int]($images | Measure-Object Width -Maximum).Maximum))
+    $cellHeight = [Math]::Min($heightBudget, [Math]::Min($MaxCellHeight, [int]($images | Measure-Object Height -Maximum).Maximum))
+    $sheetWidth = $padding + ($resolvedColumns * ($cellWidth + $padding))
+    $sheetHeight = $padding + ($rows * ($cellHeight + $labelHeight + $padding))
+
+    $sheet = New-Object System.Drawing.Bitmap($sheetWidth, $sheetHeight)
+    try {
+      $graphics = [System.Drawing.Graphics]::FromImage($sheet)
+      try {
+        $graphics.Clear([System.Drawing.Color]::FromArgb(24, 24, 24))
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $font = [System.Drawing.SystemFonts]::DefaultFont
+        $labelBrush = [System.Drawing.Brushes]::White
+        $cellBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(40, 40, 40))
+        try {
+          for ($index = 0; $index -lt $images.Count; $index += 1) {
+            $column = $index % $resolvedColumns
+            $row = [int][Math]::Floor($index / [double]$resolvedColumns)
+            $cellX = $padding + ($column * ($cellWidth + $padding))
+            $cellY = $padding + ($row * ($cellHeight + $labelHeight + $padding))
+            $graphics.FillRectangle($cellBrush, $cellX, $cellY, $cellWidth, $cellHeight)
+
+            $image = $images[$index]
+            $scale = [Math]::Min($cellWidth / [double]$image.Width, $cellHeight / [double]$image.Height)
+            $drawWidth = [Math]::Max(1, [int][Math]::Round($image.Width * $scale))
+            $drawHeight = [Math]::Max(1, [int][Math]::Round($image.Height * $scale))
+            $drawX = $cellX + [int](($cellWidth - $drawWidth) / 2)
+            $drawY = $cellY + [int](($cellHeight - $drawHeight) / 2)
+            $graphics.DrawImage($image, $drawX, $drawY, $drawWidth, $drawHeight)
+
+            $text = if ($Label.Count -gt 0) { $Label[$index] } else { "frame $index" }
+            $graphics.DrawString($text, $font, $labelBrush, $cellX, $cellY + $cellHeight + 6)
+          }
+        } finally {
+          $cellBrush.Dispose()
+        }
+      } finally {
+        $graphics.Dispose()
+      }
+      $sheet.Save($absoluteOutput, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    } finally {
+      $sheet.Dispose()
+    }
+  } finally {
+    foreach ($image in $images) {
+      $image.Dispose()
+    }
+  }
+
+  return [pscustomobject]@{
+    action = 'contactSheet'
+    path = $absoluteOutput
+    sourceCount = $absolutePaths.Count
+    columns = $resolvedColumns
+    rows = $rows
+    width = $sheetWidth
+    height = $sheetHeight
+  }
+}
+
+function Resize-AgentImage {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ImagePath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputPath,
+
+    [ValidateRange(64, 4096)]
+    [int]$MaxWidth = 960,
+
+    [ValidateRange(64, 4096)]
+    [int]$MaxHeight = 1600
+  )
+
+  $absoluteInput = Resolve-AgentImagePath -Path $ImagePath -MustExist
+  $absoluteOutput = Resolve-AgentImagePath -Path $OutputPath
+  if ([System.IO.Path]::GetExtension($absoluteOutput).ToLowerInvariant() -notin @('.jpg', '.jpeg', '.png')) {
+    throw "Resized image output must use .jpg, .jpeg, or .png: ${absoluteOutput}"
+  }
+  [void](New-Item -ItemType Directory -Path (Split-Path -Parent $absoluteOutput) -Force)
+
+  $source = [System.Drawing.Image]::FromFile($absoluteInput)
+  try {
+    $scale = [Math]::Min(1.0, [Math]::Min($MaxWidth / [double]$source.Width, $MaxHeight / [double]$source.Height))
+    $width = [Math]::Max(1, [int][Math]::Round($source.Width * $scale))
+    $height = [Math]::Max(1, [int][Math]::Round($source.Height * $scale))
+    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+    try {
+      $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+      try {
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.DrawImage($source, 0, 0, $width, $height)
+      } finally {
+        $graphics.Dispose()
+      }
+      if ([System.IO.Path]::GetExtension($absoluteOutput).ToLowerInvariant() -eq '.png') {
+        $bitmap.Save($absoluteOutput, [System.Drawing.Imaging.ImageFormat]::Png)
+      } else {
+        $bitmap.Save($absoluteOutput, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+      }
+    } finally {
+      $bitmap.Dispose()
+    }
+  } finally {
+    $source.Dispose()
+  }
+
+  return [pscustomobject]@{
+    action = 'resizeImage'
+    source = $absoluteInput
+    path = $absoluteOutput
+    width = $width
+    height = $height
+    maxWidth = $MaxWidth
+    maxHeight = $MaxHeight
+  }
+}
+
 Export-ModuleMember -Function @(
   'Get-AgentImageInfo',
   'Crop-AgentImage',
   'Compare-AgentImage',
-  'Assert-AgentImage'
+  'Assert-AgentImage',
+  'New-AgentContactSheet',
+  'Resize-AgentImage'
 )

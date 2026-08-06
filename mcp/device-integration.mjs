@@ -18,7 +18,7 @@ const client = new Client({
 try {
   await client.connect(transport);
   const result = await client.callTool({
-    name: "harmony_screenshot",
+    name: "harmony_capture",
     arguments: { emulatorName },
   });
   const image = result.content.find((item) => item.type === "image");
@@ -29,13 +29,11 @@ try {
   assert.equal(image.mimeType, "image/jpeg");
   assert.ok(image.data.length > 1000, "MCP image payload is unexpectedly small.");
   const tapResult = await client.callTool({
-    name: "harmony_tap",
+    name: "harmony_device_run",
     arguments: {
       emulatorName,
-      xRatio: 0.5,
-      yRatio: 0.5,
-      capture: true,
-      captureDelayMs: 100,
+      steps: [{ action: "tap", xRatio: 0.5, yRatio: 0.5 }],
+      capture: { mode: "final", presentation: "originals" },
     },
   });
   const tapImage = tapResult.content.find((item) => item.type === "image");

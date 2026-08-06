@@ -1,0 +1,9 @@
+[
+  { "kind": "direct", "prompt": "Inspect the connected HarmonyOS emulator and project metadata.", "tool": "harmony_inspect" },
+  { "kind": "direct", "prompt": "Build this HarmonyOS project and run its local tests.", "tool": "harmony_project_run" },
+  { "kind": "direct", "prompt": "Swipe through this screen and sample six frames as one contact sheet.", "tool": "harmony_device_run" },
+  { "kind": "indirect", "prompt": "I need to know what changed visually after these three taps.", "tool": "harmony_device_run" },
+  { "kind": "indirect", "prompt": "Why did the application fail immediately after launch? Show only relevant recent logs.", "tool": "harmony_logs" },
+  { "kind": "negative", "prompt": "Explain what an HDC target identifier means without accessing a device.", "tool": null },
+  { "kind": "negative", "prompt": "Review this ArkTS source file for naming issues.", "tool": null }
+]

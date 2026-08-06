@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import JSON5 from "json5";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -13,123 +14,122 @@ const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
 const toolRoot = path.resolve(serverDirectory, "..");
 const cliPath = path.join(toolRoot, "hdc-agent.ps1");
 const artifactsRoot = path.join(toolRoot, "artifacts", "mcp");
-const server = new McpServer({
-  name: "harmony-agent-tools",
-  version: "0.1.0",
+export const serverInstructions = "Use harmony_inspect before device or project work when the target, bundle, module, ability, or product is unknown. Prefer one harmony_device_run call with ordered steps over repeated tap/swipe calls. Request interval or checkpoint capture only when motion evidence matters; prefer a contact sheet to original frames to reduce tokens. Use harmony_project_run for build/test/deploy and harmony_logs only for bounded diagnostics. Results are compact; follow diagnosticsPath or artifact paths only when needed.";
+
+const artifactSchema = z.object({
+  kind: z.string(),
+  path: z.string(),
+  role: z.string().optional(),
 });
+const outputSchema = {
+  ok: z.boolean(),
+  action: z.string(),
+  summary: z.string(),
+  runId: z.string(),
+  warnings: z.array(z.string()),
+  diagnosticsPath: z.string().nullable(),
+  artifacts: z.array(artifactSchema),
+  data: z.record(z.string(), z.unknown()),
+};
 
-function resolveHdcPath() {
-  const candidates = [
-    process.env.HDC_PATH,
-    process.env.DEVECO_SDK_HOME &&
-      path.join(process.env.DEVECO_SDK_HOME, "default", "openharmony", "toolchains", "hdc.exe"),
-    "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe",
-  ].filter(Boolean);
-  return candidates.find((candidate) => existsSync(candidate)) || "hdc";
+function runId() {
+  return `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
 }
-
-const hdcPath = resolveHdcPath();
 
 function deviceArguments(input) {
-  if (input.target && input.emulatorName) {
-    throw new Error("Specify either target or emulatorName, not both.");
-  }
-  if (input.target) {
-    return ["-HdcPath", hdcPath, "-Target", input.target];
-  }
-  if (input.emulatorName) {
-    return ["-HdcPath", hdcPath, "-EmulatorName", input.emulatorName];
-  }
-  return ["-HdcPath", hdcPath];
+  if (input.target && input.emulatorName) throw new Error("Specify either target or emulatorName, not both.");
+  const args = [];
+  if (process.env.HDC_PATH) args.push("-HdcPath", process.env.HDC_PATH);
+  if (input.target) args.push("-Target", input.target);
+  if (input.emulatorName) args.push("-EmulatorName", input.emulatorName);
+  return args;
 }
 
-function pointArguments(input, prefix = "") {
-  const pixelX = prefix ? `${prefix}X` : "x";
-  const pixelY = prefix ? `${prefix}Y` : "y";
-  const ratioX = prefix ? `${prefix}XRatio` : "xRatio";
-  const ratioY = prefix ? `${prefix}YRatio` : "yRatio";
-  const cliPrefix = prefix;
-  const hasPixels = input[pixelX] !== undefined || input[pixelY] !== undefined;
-  const hasRatios = input[ratioX] !== undefined || input[ratioY] !== undefined;
-  if (hasPixels === hasRatios) {
-    throw new Error(`Specify exactly one coordinate pair for ${prefix || "tap"}.`);
-  }
-  if (hasPixels) {
-    if (input[pixelX] === undefined || input[pixelY] === undefined) {
-      throw new Error(`Both ${pixelX} and ${pixelY} are required.`);
-    }
-    return [`-${cliPrefix}X`, String(input[pixelX]), `-${cliPrefix}Y`, String(input[pixelY])];
-  }
-  if (input[ratioX] === undefined || input[ratioY] === undefined) {
-    throw new Error(`Both ${ratioX} and ${ratioY} are required.`);
-  }
-  return [
-    `-${cliPrefix}XRatio`,
-    String(input[ratioX]),
-    `-${cliPrefix}YRatio`,
-    String(input[ratioY]),
-  ];
+function tailText(value, max = 6000) {
+  const text = String(value || "").trim();
+  return text.length <= max ? text : `…${text.slice(-max)}`;
 }
 
-async function invokeCli(command, args = []) {
+export async function invokeCli(command, args = [], options = {}) {
+  const id = options.runId || runId();
   try {
-    const { stdout, stderr } = await execFileAsync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        cliPath,
-        command,
-        ...args,
-      ],
-      {
-        cwd: toolRoot,
-        windowsHide: true,
-        maxBuffer: 16 * 1024 * 1024,
-        env: {
-          ...process.env,
-          PATHEXT:
-            process.env.PATHEXT ||
-            ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL",
-        },
-      },
-    );
-    if (stderr.trim()) {
-      throw new Error(stderr.trim());
-    }
+    const { stdout, stderr } = await execFileAsync("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", cliPath, command, ...args,
+    ], {
+      cwd: toolRoot,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, PATHEXT: process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD" },
+    });
+    if (stderr.trim()) throw Object.assign(new Error(stderr.trim()), { stderr, stdout });
     return JSON.parse(stdout);
   } catch (error) {
-    const detail = error.stderr?.trim() || error.stdout?.trim() || error.message;
-    throw new Error(`harmony-agent-tools ${command} failed: ${detail}`, { cause: error });
+    const directory = path.join(artifactsRoot, "runs", id);
+    await mkdir(directory, { recursive: true });
+    const diagnosticsPath = path.join(directory, "error.log");
+    const detail = tailText(error.stderr || error.stdout || error.message);
+    await writeFile(diagnosticsPath, `${command} failed\n${detail}\n`, "utf8");
+    const wrapped = new Error(`${command} failed: ${detail}`);
+    wrapped.diagnosticsPath = diagnosticsPath;
+    throw wrapped;
   }
 }
 
-function uniqueImagePath(prefix) {
-  const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
-  return path.join(artifactsRoot, `${prefix}-${timestamp}-${process.pid}.jpeg`);
+function uniqueArtifact(id, name) {
+  return path.join(artifactsRoot, "runs", id, name);
 }
 
 function imageMimeType(imagePath) {
   return path.extname(imagePath).toLowerCase() === ".png" ? "image/png" : "image/jpeg";
 }
 
-async function imageContent(imagePath) {
+export async function imageContent(imagePath) {
   const absolutePath = path.resolve(imagePath);
   const data = await readFile(absolutePath);
-  return {
-    type: "image",
-    data: data.toString("base64"),
-    mimeType: imageMimeType(absolutePath),
-  };
+  return { type: "image", data: data.toString("base64"), mimeType: imageMimeType(absolutePath) };
 }
 
-function resultText(result) {
-  return {
-    type: "text",
-    text: JSON.stringify(result, null, 2),
-  };
+function baseResult(action, summary, id, data = {}, artifacts = [], warnings = []) {
+  return { ok: true, action, summary, runId: id, warnings, diagnosticsPath: null, artifacts, data };
+}
+
+function compactArray(values, limit, project = (value) => value) {
+  const source = Array.isArray(values) ? values : [];
+  return { values: source.slice(0, limit).map(project), truncated: source.length > limit };
+}
+
+async function createPreview(invoke, id, sourcePath, name = "preview.jpeg") {
+  const previewPath = uniqueArtifact(id, name);
+  return invoke("resize-image", ["-ImagePath", sourcePath, "-OutputPath", previewPath, "-MaxWidth", "960", "-MaxHeight", "1600"], { runId: id });
+}
+
+async function toolResponse(result, imagePaths = []) {
+  const content = [{ type: "text", text: result.summary }];
+  for (const imagePath of imagePaths) content.push(await imageContent(imagePath));
+  return { structuredContent: result, content };
+}
+
+function register(server, name, definition, handler) {
+  server.registerTool(name, { ...definition, outputSchema }, async (input) => {
+    const id = runId();
+    try {
+      return await handler(input, id);
+    } catch (error) {
+      const result = {
+        ok: false,
+        action: name,
+        summary: tailText(error.message, 700),
+        runId: id,
+        warnings: [],
+        diagnosticsPath: error.diagnosticsPath || null,
+        artifacts: error.artifacts || [],
+        data: error.data || {},
+      };
+      const content = [{ type: "text", text: result.summary }];
+      for (const imagePath of error.imagePaths || []) content.push(await imageContent(imagePath));
+      return { isError: true, structuredContent: result, content };
+    }
+  });
 }
 
 const targetSchema = {
@@ -137,269 +137,311 @@ const targetSchema = {
   emulatorName: z.string().min(1).optional(),
 };
 
-const pointSchema = {
-  x: z.number().int().nonnegative().optional(),
-  y: z.number().int().nonnegative().optional(),
-  xRatio: z.number().min(0).max(1).optional(),
-  yRatio: z.number().min(0).max(1).optional(),
-};
+async function readJson5(filePath) {
+  return JSON5.parse(await readFile(filePath, "utf8"));
+}
 
-const movementSchema = {
-  startX: z.number().int().optional(),
-  startY: z.number().int().optional(),
-  endX: z.number().int().optional(),
-  endY: z.number().int().optional(),
-  startXRatio: z.number().min(0).max(1).optional(),
-  startYRatio: z.number().min(0).max(1).optional(),
-  endXRatio: z.number().min(0).max(1).optional(),
-  endYRatio: z.number().min(0).max(1).optional(),
-  durationMs: z.number().int().min(1).max(15000).default(300),
-  keepMs: z.number().int().min(0).max(60000).default(0),
-};
-
-server.registerTool(
-  "harmony_display",
-  {
-    description: "Return the physical pixel dimensions of a connected HarmonyOS target.",
-    inputSchema: targetSchema,
-  },
-  async (input) => {
-    const result = await invokeCli("display", deviceArguments(input));
-    return { content: [resultText(result)] };
-  },
-);
-
-server.registerTool(
-  "harmony_wait_display",
-  {
-    description: "Wait until HarmonyOS display dimensions settle and return the stable display.",
-    inputSchema: {
-      ...targetSchema,
-      timeoutMs: z.number().int().min(1000).max(10000).default(5000),
-    },
-  },
-  async (input) => {
-    const result = await invokeCli("wait-display", [
-      ...deviceArguments(input),
-      "-TimeoutMs",
-      String(input.timeoutMs),
-    ]);
-    return { content: [resultText(result)] };
-  },
-);
-
-server.registerTool(
-  "harmony_fold",
-  {
-    description: "Set the folding state of a connected HarmonyOS foldable target.",
-    inputSchema: {
-      ...targetSchema,
-      state: z.enum(["folded", "half", "expanded", "dual-expanded"]),
-    },
-  },
-  async (input) => {
-    const result = await invokeCli("fold", [
-      ...deviceArguments(input),
-      "-FoldState",
-      input.state,
-    ]);
-    return { content: [resultText(result)] };
-  },
-);
-
-server.registerTool(
-  "harmony_rotate",
-  {
-    description: "Rotate a connected HarmonyOS target to an absolute clockwise angle.",
-    inputSchema: {
-      ...targetSchema,
-      rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
-    },
-  },
-  async (input) => {
-    const result = await invokeCli("rotate", [
-      ...deviceArguments(input),
-      "-Rotation",
-      String(input.rotation),
-    ]);
-    return { content: [resultText(result)] };
-  },
-);
-
-server.registerTool(
-  "harmony_screenshot",
-  {
-    description: "Capture a HarmonyOS display and return the image directly.",
-    inputSchema: {
-      ...targetSchema,
-      outputPath: z.string().min(1).optional(),
-      delayMs: z.number().int().min(0).max(3600000).default(0),
-    },
-  },
-  async (input) => {
-    await mkdir(artifactsRoot, { recursive: true });
-    const outputPath = path.resolve(input.outputPath || uniqueImagePath("screen"));
-    const result = await invokeCli("screenshot", [
-      ...deviceArguments(input),
-      "-OutputPath",
-      outputPath,
-      "-DelayMs",
-      String(input.delayMs),
-    ]);
-    return { content: [resultText(result), await imageContent(result.path)] };
-  },
-);
-
-server.registerTool(
-  "harmony_tap",
-  {
-    description: "Tap using pixel or normalized coordinates, optionally returning a screenshot.",
-    inputSchema: {
-      ...targetSchema,
-      ...pointSchema,
-      pressMs: z.number().int().min(1).max(450).default(100),
-      capture: z.boolean().default(true),
-      captureDelayMs: z.number().int().min(0).max(3600000).default(150),
-    },
-  },
-  async (input) => {
-    const selector = deviceArguments(input);
-    const result = await invokeCli("tap", [
-      ...selector,
-      ...pointArguments(input),
-      "-PressMs",
-      String(input.pressMs),
-    ]);
-    const content = [resultText(result)];
-    if (input.capture) {
-      await mkdir(artifactsRoot, { recursive: true });
-      const screenshot = await invokeCli("screenshot", [
-        ...selector,
-        "-OutputPath",
-        uniqueImagePath("tap"),
-        "-DelayMs",
-        String(input.captureDelayMs),
-      ]);
-      content.push(resultText(screenshot), await imageContent(screenshot.path));
+async function discoverProject(projectRoot) {
+  const root = path.resolve(projectRoot);
+  const profilePath = path.join(root, "build-profile.json5");
+  if (!existsSync(profilePath)) throw new Error(`Not a HarmonyOS project: ${profilePath} is missing.`);
+  const profile = await readJson5(profilePath);
+  const products = (profile.app?.products || []).map((item) => item.name).filter(Boolean);
+  const modules = (profile.modules || []).map((item) => ({ name: item.name, srcPath: item.srcPath })).filter((item) => item.name);
+  let bundle = "";
+  const appConfig = path.join(root, "AppScope", "app.json5");
+  if (existsSync(appConfig)) bundle = (await readJson5(appConfig)).app?.bundleName || "";
+  const abilities = [];
+  for (const module of modules) {
+    const moduleRoot = path.resolve(root, module.srcPath || module.name);
+    const relativeModuleRoot = path.relative(root, moduleRoot);
+    if (relativeModuleRoot.startsWith("..") || path.isAbsolute(relativeModuleRoot)) throw new Error(`Module srcPath escapes projectRoot: ${module.srcPath || module.name}`);
+    const moduleConfig = path.join(moduleRoot, "src", "main", "module.json5");
+    if (!existsSync(moduleConfig)) continue;
+    const config = (await readJson5(moduleConfig)).module || {};
+    for (const ability of config.abilities || []) abilities.push({ module: module.name, name: ability.name });
+    if (config.mainElement && !abilities.some((item) => item.module === module.name && item.name === config.mainElement)) {
+      abilities.push({ module: module.name, name: config.mainElement });
     }
-    return { content };
-  },
-);
+  }
+  return { root, products, modules, bundle, abilities };
+}
 
-server.registerTool(
-  "harmony_swipe",
-  {
-    description: "Swipe using pixel or normalized coordinates, optionally returning a screenshot.",
-    inputSchema: {
-      ...targetSchema,
-      ...movementSchema,
-      capture: z.boolean().default(true),
-      captureDelayMs: z.number().int().min(0).max(3600000).default(150),
-    },
-  },
-  async (input) => {
-    const selector = deviceArguments(input);
-    const result = await invokeCli("swipe", [
-      ...selector,
-      ...pointArguments(input, "start"),
-      ...pointArguments(input, "end"),
-      "-DurationMs",
-      String(input.durationMs),
-      "-KeepMs",
-      String(input.keepMs),
-    ]);
-    const content = [resultText(result)];
-    if (input.capture) {
-      await mkdir(artifactsRoot, { recursive: true });
-      const screenshot = await invokeCli("screenshot", [
-        ...selector,
-        "-OutputPath",
-        uniqueImagePath("swipe"),
-        "-DelayMs",
-        String(input.captureDelayMs),
-      ]);
-      content.push(resultText(screenshot), await imageContent(screenshot.path));
+function scenarioStep(step) {
+  const result = { action: step.action };
+  for (const key of ["x", "y", "xRatio", "yRatio", "pressMs", "startX", "startY", "endX", "endY", "startXRatio", "startYRatio", "endXRatio", "endYRatio", "durationMs", "keepMs", "milliseconds", "delayMs", "state", "rotation", "timeoutMs", "atMs"]) {
+    if (step[key] !== undefined) result[key] = step[key];
+  }
+  return result;
+}
+
+function captureArguments(capture, durationMs, outputDirectory, sheetPath) {
+  const args = ["-OutputDirectory", outputDirectory, "-RecordDurationMs", String(durationMs), "-MaxFrames", String(capture.maxFrames), "-MaxCaptureConcurrency", String(capture.maxConcurrency)];
+  if (capture.before) args.push("-CaptureBefore");
+  if (capture.mode === "interval") {
+    if (capture.frameCount) args.push("-FrameCount", String(capture.frameCount));
+    else args.push("-CaptureIntervalMs", String(capture.intervalMs || 500));
+  } else {
+    args.push("-CaptureAtMs", capture.atMs.join(","));
+  }
+  if (sheetPath) args.push("-ContactSheetPath", sheetPath, "-ContactSheetColumns", String(capture.columns || 0));
+  return args;
+}
+
+export function createHarmonyServer({ invoke = invokeCli } = {}) {
+  const server = new McpServer({ name: "harmony-agent-tools", version: "0.2.0" }, { instructions: serverInstructions });
+
+  register(server, "harmony_inspect", {
+    description: "Use this to discover HarmonyOS tools, targets, display, project package candidates, or safe project metadata before acting. Do not use it for logs or mutations.",
+    inputSchema: { ...targetSchema, scope: z.enum(["environment", "device", "project", "all"]).default("environment"), projectRoot: z.string().min(1).optional() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async (input, id) => {
+    const data = {};
+    const warnings = [];
+    if (["environment", "all"].includes(input.scope)) {
+      const health = await invoke("doctor", input.projectRoot ? ["-ProjectRoot", path.resolve(input.projectRoot)] : [], { runId: id });
+      const checks = compactArray(health.checks, 8, (item) => ({ name: item.name, status: item.status, detail: tailText(item.detail || item.message, 80) }));
+      data.health = { healthy: health.healthy ?? null, checks: checks.values };
+      if (checks.truncated) warnings.push("Environment checks were truncated to 8 entries.");
     }
-    return { content };
-  },
-);
+    if (["device", "all"].includes(input.scope)) {
+      const targets = compactArray(await invoke("targets", [], { runId: id }), 8, (item) => ({ target: item.target || item.id, state: item.state, model: item.model }));
+      const emulators = compactArray(await invoke("emulators", [], { runId: id }), 8, (item) => ({ name: item.name, target: item.target, state: item.state }));
+      data.targets = targets.values;
+      data.emulators = emulators.values;
+      if (targets.truncated || emulators.truncated) warnings.push("Device candidates were truncated to 8 entries.");
+      if (input.target || input.emulatorName) {
+        data.display = await invoke("display", deviceArguments(input), { runId: id });
+      }
+    }
+    if (["project", "all"].includes(input.scope)) {
+      if (!input.projectRoot) throw new Error("projectRoot is required for project or all inspection.");
+      const project = await discoverProject(input.projectRoot);
+      const modules = compactArray(project.modules, 8, (item) => ({ name: item.name, srcPath: item.srcPath }));
+      const abilities = compactArray(project.abilities, 8);
+      const products = compactArray(project.products, 8);
+      const packages = compactArray(await invoke("packages", ["-ProjectRoot", project.root, "-IncludeTests"], { runId: id }), 6, (item) => ({ path: item.path, module: item.module, test: item.test }));
+      data.project = { root: project.root, bundle: project.bundle, products: products.values, modules: modules.values, abilities: abilities.values, packages: packages.values };
+      if (packages.truncated || modules.truncated || abilities.truncated || products.truncated) warnings.push("Project candidates were truncated to preserve the result budget.");
+    }
+    return toolResponse(baseResult("inspect", `Inspected ${input.scope} context.`, id, data, [], warnings));
+  });
 
-server.registerTool(
-  "harmony_gesture_capture",
-  {
-    description: "Perform a swipe and return images captured at requested millisecond offsets.",
-    inputSchema: {
-      ...targetSchema,
-      ...movementSchema,
-      captureAtMs: z.array(z.number().int().min(0).max(3600000)).min(1),
-      prefix: z.string().min(1).default("gesture"),
-      outputDirectory: z.string().min(1).optional(),
-    },
-  },
-  async (input) => {
-    const outputDirectory = path.resolve(
-      input.outputDirectory || path.join(artifactsRoot, `gesture-${Date.now()}`),
-    );
-    const result = await invokeCli("gesture-capture", [
-      ...deviceArguments(input),
-      ...pointArguments(input, "start"),
-      ...pointArguments(input, "end"),
-      "-DurationMs",
-      String(input.durationMs),
-      "-KeepMs",
-      String(input.keepMs),
-      "-CaptureAtMs",
-      input.captureAtMs.join(","),
-      "-Prefix",
-      input.prefix,
-      "-OutputDirectory",
-      outputDirectory,
-    ]);
-    return {
-      content: [
-        resultText(result),
-        ...(await Promise.all(result.artifacts.map((artifact) => imageContent(artifact.path)))),
-      ],
-    };
-  },
-);
+  const stepSchema = z.object({
+    action: z.enum(["tap", "swipe", "wait", "fold", "rotate", "waitDisplay"]),
+    x: z.number().int().optional(), y: z.number().int().optional(), xRatio: z.number().min(0).max(1).optional(), yRatio: z.number().min(0).max(1).optional(),
+    pressMs: z.number().int().min(1).max(450).optional(),
+    startX: z.number().int().optional(), startY: z.number().int().optional(), endX: z.number().int().optional(), endY: z.number().int().optional(),
+    startXRatio: z.number().min(0).max(1).optional(), startYRatio: z.number().min(0).max(1).optional(), endXRatio: z.number().min(0).max(1).optional(), endYRatio: z.number().min(0).max(1).optional(),
+    durationMs: z.number().int().min(0).max(60000).optional(), keepMs: z.number().int().min(0).max(60000).optional(), milliseconds: z.number().int().min(0).max(3600000).optional(),
+    state: z.enum(["folded", "half", "expanded", "dual-expanded"]).optional(), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(), timeoutMs: z.number().int().optional(), atMs: z.number().int().nonnegative().optional(),
+  });
+  const captureSchema = z.object({
+    mode: z.enum(["none", "final", "interval", "checkpoints", "on-error"]).default("final"),
+    intervalMs: z.number().int().min(50).max(60000).optional(), frameCount: z.number().int().min(1).max(60).optional(), atMs: z.array(z.number().int().nonnegative()).default([]),
+    before: z.boolean().default(false), postRollMs: z.number().int().min(0).max(60000).default(0), maxFrames: z.number().int().min(1).max(60).default(12), maxConcurrency: z.number().int().min(1).max(4).default(2),
+    presentation: z.enum(["contact-sheet", "originals", "both", "manifest-only"]).default("contact-sheet"), columns: z.number().int().min(0).max(12).default(0), maxReturnedImages: z.number().int().min(0).max(8).default(4),
+  }).default({});
 
-server.registerTool(
-  "harmony_compare_images",
-  {
-    description: "Compare two images and return metrics plus an optional visual diff image.",
-    inputSchema: {
-      baselinePath: z.string().min(1),
-      actualPath: z.string().min(1),
-      differencePath: z.string().min(1).optional(),
-      pixelTolerance: z.number().int().min(0).max(255).default(0),
-      maxDifferenceRatio: z.number().min(0).max(1).default(0),
-      maxMeanError: z.number().min(0).max(1).default(0),
-    },
-  },
-  async (input) => {
-    const differencePath = path.resolve(input.differencePath || uniqueImagePath("difference"));
-    const result = await invokeCli("compare-images", [
-      "-BaselinePath",
-      path.resolve(input.baselinePath),
-      "-ActualPath",
-      path.resolve(input.actualPath),
-      "-DifferencePath",
-      differencePath,
-      "-PixelTolerance",
-      String(input.pixelTolerance),
-      "-MaxDifferenceRatio",
-      String(input.maxDifferenceRatio),
-      "-MaxMeanError",
-      String(input.maxMeanError),
-    ]);
-    return { content: [resultText(result), await imageContent(result.difference)] };
-  },
-);
+  register(server, "harmony_device_run", {
+    description: "Use this to execute an ordered HarmonyOS interaction as one scenario, optionally sampling screenshots during touch or the whole flow. Prefer contact-sheet presentation to reduce image tokens.",
+    inputSchema: { ...targetSchema, steps: z.array(stepSchema).min(1).max(100), capture: captureSchema, durationMs: z.number().int().min(1).max(3600000).optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  }, async (input, id) => {
+    const directory = path.join(artifactsRoot, "runs", id);
+    await mkdir(directory, { recursive: true });
+    const scenarioPath = path.join(directory, "scenario.json");
+    await writeFile(scenarioPath, JSON.stringify({ steps: input.steps.map(scenarioStep) }, null, 2));
+    let estimatedDurationMs = 0;
+    for (const step of input.steps) {
+      if (step.atMs !== undefined) estimatedDurationMs = Math.max(estimatedDurationMs, step.atMs);
+      if (step.action === "wait") estimatedDurationMs += step.milliseconds || 0;
+      else if (step.action === "tap") estimatedDurationMs += step.pressMs || 100;
+      else if (step.action === "swipe") estimatedDurationMs += (step.durationMs || 300) + (step.keepMs || 0);
+      else if (step.action === "waitDisplay") estimatedDurationMs += step.timeoutMs || 5000;
+      else if (step.action === "fold" || step.action === "rotate") estimatedDurationMs += 10000;
+    }
+    let baseDurationMs = input.durationMs || Math.max(1000, estimatedDurationMs + 500);
+    if (input.capture.mode === "checkpoints" && input.capture.atMs.length > 0) baseDurationMs = Math.max(baseDurationMs, Math.max(...input.capture.atMs));
+    const durationMs = baseDurationMs + input.capture.postRollMs;
+    if (durationMs > 3600000) throw new Error("The capture duration plus post-roll must not exceed 3600000ms.");
+    const scenarioArgs = ["-ScenarioPath", scenarioPath, ...deviceArguments(input)];
+    let raw;
+    let imagePaths = [];
+    const artifacts = [{ kind: "manifest", path: scenarioPath, role: "scenario" }];
+    try {
+      if (["interval", "checkpoints"].includes(input.capture.mode)) {
+        if (input.capture.frameCount !== undefined && input.capture.intervalMs !== undefined) throw new Error("capture.frameCount and capture.intervalMs are mutually exclusive.");
+        if (input.capture.mode === "checkpoints" && input.capture.atMs.length === 0) throw new Error("capture.atMs requires at least one checkpoint.");
+        const sheetPath = ["contact-sheet", "both"].includes(input.capture.presentation) ? path.join(directory, "trace-contact-sheet.jpg") : "";
+        raw = await invoke("trace-scenario", [...scenarioArgs, "-RecordDurationMs", String(durationMs), ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath)], { runId: id });
+        const frames = raw.frames || [];
+        if (raw.manifestPath) artifacts.push({ kind: "manifest", path: raw.manifestPath, role: "frames" });
+        if (frames.length > 0) artifacts.push({ kind: "directory", path: path.dirname(frames[0].path), role: "original-frames" });
+        if (raw.contactSheet?.path) {
+          artifacts.push({ kind: "image", path: raw.contactSheet.path, role: "contact-sheet" });
+          imagePaths.push(raw.contactSheet.path);
+        }
+        if (["originals", "both"].includes(input.capture.presentation)) imagePaths.push(...frames.slice(0, input.capture.maxReturnedImages).map((frame) => frame.path));
+      } else {
+        raw = await invoke("scenario", [...scenarioArgs, "-OutputDirectory", path.join(directory, "scenario")], { runId: id });
+        if (input.capture.mode === "final") {
+          const screenPath = path.join(directory, "final.jpeg");
+          const screen = await invoke("screenshot", [...deviceArguments(input), "-OutputPath", screenPath], { runId: id });
+          artifacts.push({ kind: "image", path: screen.path, role: "final" });
+          if (input.capture.presentation !== "manifest-only") {
+            const preview = await createPreview(invoke, id, screen.path, "final-preview.jpeg");
+            artifacts.push({ kind: "image", path: preview.path, role: "preview" });
+            imagePaths.push(preview.path);
+          }
+        }
+      }
+    } catch (error) {
+      if (input.capture.mode === "on-error") {
+        const screenPath = path.join(directory, "error.jpeg");
+        try {
+          const screen = await invoke("screenshot", [...deviceArguments(input), "-OutputPath", screenPath], { runId: id });
+          const preview = await createPreview(invoke, id, screen.path, "error-preview.jpeg");
+          error.artifacts = [{ kind: "image", path: screen.path, role: "on-error" }, { kind: "image", path: preview.path, role: "preview" }];
+          error.imagePaths = [preview.path];
+          error.data = { captureMode: "on-error" };
+        } catch { /* retain original failure */ }
+      }
+      throw error;
+    }
+    const actualStarts = (raw.frames || []).filter((frame) => frame.phase !== "before" && frame.actualStartMs !== null && frame.actualStartMs !== undefined).map((frame) => frame.actualStartMs);
+    const effectiveIntervalMs = actualStarts.length > 1 ? Math.round((actualStarts.at(-1) - actualStarts[0]) / (actualStarts.length - 1)) : null;
+    const data = { stepCount: input.steps.length, captureMode: input.capture.mode, frameCount: raw.frames?.length || (imagePaths.length ? 1 : 0), droppedFrames: raw.droppedFrames?.length || 0, maxLatenessMs: raw.maxLatenessMs || 0, effectiveIntervalMs };
+    const warnings = data.droppedFrames > 0 ? [`Dropped ${data.droppedFrames} frame(s) because snapshot concurrency was saturated${effectiveIntervalMs === null ? "." : `; effective captured interval was about ${effectiveIntervalMs}ms.`}`] : [];
+    return toolResponse(baseResult("deviceRun", `Executed ${input.steps.length} device steps; captured ${data.frameCount} frame(s).`, id, data, artifacts, warnings), imagePaths);
+  });
 
-export { imageContent, invokeCli };
+  register(server, "harmony_project_run", {
+    description: "Use this for HarmonyOS build, local test, device test, or deploy. It safely discovers project defaults when unique; provide overrides when ambiguous.",
+    inputSchema: { ...targetSchema, operation: z.enum(["build", "test-local", "test-device", "deploy"]), projectRoot: z.string().min(1), product: z.string().min(1).optional(), module: z.string().min(1).optional(), testModule: z.string().min(1).optional(), bundle: z.string().min(1).optional(), ability: z.string().min(1).optional(), packagePath: z.string().min(1).optional(), hvigorPath: z.string().min(1).optional().describe("Hvigor wrapper for test-local/test-device only."), hvigorNodePath: z.string().min(1).optional().describe("Node executable for a JavaScript Hvigor wrapper in test-local/test-device."), skipBuild: z.boolean().default(false), captureAfterStart: z.boolean().default(false) },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  }, async (input, id) => {
+    const project = await discoverProject(input.projectRoot);
+    if (!input.product && project.products.length !== 1) throw new Error(project.products.length === 0 ? "No product was discovered; provide product." : `Multiple products found (${project.products.join(", ")}); provide product.`);
+    if (!input.module && project.modules.length !== 1) throw new Error(project.modules.length === 0 ? "No module was discovered; provide module." : `Multiple modules found (${project.modules.map((item) => item.name).join(", ")}); provide module.`);
+    const product = input.product || project.products[0];
+    const moduleName = input.module || project.modules[0].name;
+    const bundle = input.bundle || project.bundle;
+    const moduleAbilities = project.abilities.filter((item) => item.module === moduleName);
+    if (input.operation === "deploy" && !input.ability && moduleAbilities.length > 1) throw new Error(`Multiple abilities found (${moduleAbilities.map((item) => item.name).join(", ")}); provide ability.`);
+    const abilityEntry = input.ability ? { name: input.ability, module: moduleName } : moduleAbilities[0];
+    const args = ["-ProjectRoot", project.root, "-Product", product];
+    if (input.operation === "build") args.push("-Modules", moduleName);
+    else args.push("-Module", moduleName);
+    if (["test-local", "test-device"].includes(input.operation)) {
+      if (input.hvigorPath) args.push("-HvigorPath", path.resolve(input.hvigorPath));
+      if (input.hvigorNodePath) args.push("-HvigorNodePath", path.resolve(input.hvigorNodePath));
+    }
+    if (input.target || input.emulatorName) args.push(...deviceArguments(input));
+    if (input.skipBuild) args.push("-SkipBuild");
+    if (input.operation === "test-device") {
+      if (!bundle) throw new Error("Unable to discover bundle; provide bundle.");
+      args.push("-Bundle", bundle, "-TestModule", input.testModule || "entry_test");
+    }
+    if (input.operation === "deploy") {
+      if (!bundle || !abilityEntry?.name) throw new Error("Unable to discover bundle/ability; provide overrides.");
+      let packagePath = input.packagePath;
+      if (!input.skipBuild) {
+        await invoke("build", ["-ProjectRoot", project.root, "-Product", product, "-Modules", moduleName], { runId: id });
+        if (!args.includes("-SkipBuild")) args.push("-SkipBuild");
+      }
+      if (!packagePath) {
+        if (input.skipBuild) throw new Error("packagePath is required for deploy when skipBuild is true.");
+        const packages = await invoke("packages", ["-ProjectRoot", project.root], { runId: id });
+        if (packages.length !== 1) throw new Error(`Expected one deployable package, found ${packages.length}; provide packagePath.`);
+        packagePath = packages[0].path;
+      }
+      args.push("-PackagePath", path.resolve(packagePath), "-Bundle", bundle, "-Ability", abilityEntry.name);
+    }
+    const raw = await invoke(input.operation, args, { runId: id });
+    const artifacts = [];
+    const data = { operation: input.operation, product, module: moduleName, bundle: bundle || null, passed: raw.passed ?? null, exitCode: raw.exitCode ?? raw.build?.exitCode ?? null };
+    const imagePaths = [];
+    if (input.operation === "deploy" && input.captureAfterStart) {
+      const screenPath = uniqueArtifact(id, "started.jpeg");
+      const screen = await invoke("screenshot", [...deviceArguments(input), "-OutputPath", screenPath], { runId: id });
+      artifacts.push({ kind: "image", path: screen.path, role: "after-start" });
+      const preview = await createPreview(invoke, id, screen.path, "started-preview.jpeg");
+      artifacts.push({ kind: "image", path: preview.path, role: "preview" });
+      imagePaths.push(preview.path);
+    }
+    return toolResponse(baseResult("projectRun", `${input.operation} completed${data.passed === null ? "" : data.passed ? " and passed" : " but did not pass"}.`, id, data, artifacts), imagePaths);
+  });
+
+  register(server, "harmony_capture", {
+    description: "Use this for a single HarmonyOS screenshot. Request preview to return a smaller image while preserving the original artifact path.",
+    inputSchema: { ...targetSchema, outputPath: z.string().min(1).optional(), delayMs: z.number().int().min(0).max(3600000).default(0), crop: z.object({ xRatio: z.number().min(0).max(1), yRatio: z.number().min(0).max(1), widthRatio: z.number().gt(0).max(1), heightRatio: z.number().gt(0).max(1) }).optional(), preview: z.boolean().default(true), previewMaxWidth: z.number().int().min(64).max(4096).default(960), previewMaxHeight: z.number().int().min(64).max(4096).default(1600) },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  }, async (input, id) => {
+    const outputPath = path.resolve(input.outputPath || uniqueArtifact(id, "screen.jpeg"));
+    const raw = await invoke("screenshot", [...deviceArguments(input), "-OutputPath", outputPath, "-DelayMs", String(input.delayMs)], { runId: id });
+    const artifacts = [{ kind: "image", path: raw.path, role: "original" }];
+    let returnedPath = raw.path;
+    if (input.crop) {
+      if (input.crop.xRatio + input.crop.widthRatio > 1 || input.crop.yRatio + input.crop.heightRatio > 1) throw new Error("Normalized crop must remain within the inclusive 0..1 image bounds.");
+      const info = await invoke("image-info", ["-ImagePath", raw.path], { runId: id });
+      const x = Math.min(info.width - 1, Math.round(input.crop.xRatio * (info.width - 1)));
+      const y = Math.min(info.height - 1, Math.round(input.crop.yRatio * (info.height - 1)));
+      const width = Math.max(1, Math.min(info.width - x, Math.round(input.crop.widthRatio * info.width)));
+      const height = Math.max(1, Math.min(info.height - y, Math.round(input.crop.heightRatio * info.height)));
+      const cropPath = uniqueArtifact(id, "crop.png");
+      const crop = await invoke("crop-image", ["-ImagePath", raw.path, "-OutputPath", cropPath, "-CropX", String(x), "-CropY", String(y), "-CropWidth", String(width), "-CropHeight", String(height)], { runId: id });
+      returnedPath = crop.path;
+      artifacts.push({ kind: "image", path: crop.path, role: "crop" });
+    }
+    if (input.preview) {
+      const previewPath = uniqueArtifact(id, "preview.jpeg");
+      const preview = await invoke("resize-image", ["-ImagePath", returnedPath, "-OutputPath", previewPath, "-MaxWidth", String(input.previewMaxWidth), "-MaxHeight", String(input.previewMaxHeight)], { runId: id });
+      artifacts.push({ kind: "image", path: preview.path, role: "preview" });
+      returnedPath = preview.path;
+    }
+    return toolResponse(baseResult("capture", "Captured the HarmonyOS display.", id, { returned: input.preview ? "preview" : "original" }, artifacts), [returnedPath]);
+  });
+
+  register(server, "harmony_compare", {
+    description: "Use this to compare two local images with bounded thresholds. A difference image is returned only on failure by default.",
+    inputSchema: { baselinePath: z.string().min(1), actualPath: z.string().min(1), pixelTolerance: z.number().int().min(0).max(255).default(0), maxDifferenceRatio: z.number().min(0).max(1).default(0), maxMeanError: z.number().min(0).max(1).default(0), returnDifference: z.enum(["on-failure", "always", "never"]).default("on-failure") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async (input, id) => {
+    const differencePath = uniqueArtifact(id, "difference.png");
+    const raw = await invoke("compare-images", ["-BaselinePath", path.resolve(input.baselinePath), "-ActualPath", path.resolve(input.actualPath), "-DifferencePath", differencePath, "-PixelTolerance", String(input.pixelTolerance), "-MaxDifferenceRatio", String(input.maxDifferenceRatio), "-MaxMeanError", String(input.maxMeanError)], { runId: id });
+    const shouldReturn = input.returnDifference === "always" || (input.returnDifference === "on-failure" && !raw.passed);
+    const artifacts = raw.difference ? [{ kind: "image", path: raw.difference, role: "difference" }] : [];
+    return toolResponse(baseResult("compare", raw.passed ? "Images match configured thresholds." : "Images differ beyond configured thresholds.", id, { passed: raw.passed, metrics: raw.metrics, thresholds: raw.thresholds }, artifacts), shouldReturn && raw.difference ? [raw.difference] : []);
+  });
+
+  register(server, "harmony_logs", {
+    description: "Use this for bounded HarmonyOS log diagnostics after a failure. Keep tail small and filter by bundle, level, keyword, or time range.",
+    inputSchema: { ...targetSchema, bundle: z.string().min(1).optional(), tail: z.number().int().min(1).max(500).default(120), level: z.string().optional(), keyword: z.string().optional(), from: z.string().optional(), to: z.string().optional() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  }, async (input, id) => {
+    const args = [...deviceArguments(input), "-Tail", String(input.tail)];
+    for (const [key, flag] of [["bundle", "-Bundle"], ["level", "-Level"], ["keyword", "-Keyword"], ["from", "-From"], ["to", "-To"]]) if (input[key]) args.push(flag, input[key]);
+    const raw = await invoke("logs", args, { runId: id });
+    const sourceLines = Array.isArray(raw) ? raw : raw.lines || raw.output || [];
+    const lines = [];
+    let characters = 0;
+    for (const line of sourceLines.slice().reverse()) {
+      const compact = tailText(line, 300);
+      if (lines.length >= 30 || characters + compact.length > 1400) break;
+      lines.unshift(compact);
+      characters += compact.length;
+    }
+    const warnings = lines.length < sourceLines.length ? [`Returned ${lines.length} of ${sourceLines.length} matching lines to preserve the result budget.`] : [];
+    return toolResponse(baseResult("logs", `Read ${lines.length} bounded filtered log line(s).`, id, { lines }, [], warnings));
+  });
+
+  return server;
+}
+
+export const server = createHarmonyServer();
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await mkdir(artifactsRoot, { recursive: true });
+  await server.connect(new StdioServerTransport());
 }

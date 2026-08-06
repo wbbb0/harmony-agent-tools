@@ -196,10 +196,14 @@ function Start-NativeCommand {
   if (-not $process.Start()) {
     throw "Unable to start command: $(ConvertTo-CommandDisplay $FilePath $ArgumentList)"
   }
+  $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+  $standardErrorTask = $process.StandardError.ReadToEndAsync()
 
   return [pscustomobject]@{
     process = $process
     stopwatch = $stopwatch
+    standardOutputTask = $standardOutputTask
+    standardErrorTask = $standardErrorTask
     command = ConvertTo-CommandDisplay -FilePath $FilePath -ArgumentList $ArgumentList
   }
 }
@@ -214,8 +218,8 @@ function Complete-NativeCommand {
 
   $RunningCommand.process.WaitForExit()
   $RunningCommand.stopwatch.Stop()
-  $standardOutput = $RunningCommand.process.StandardOutput.ReadToEnd()
-  $standardError = $RunningCommand.process.StandardError.ReadToEnd()
+  $standardOutput = $RunningCommand.standardOutputTask.GetAwaiter().GetResult()
+  $standardError = $RunningCommand.standardErrorTask.GetAwaiter().GetResult()
   $exitCode = $RunningCommand.process.ExitCode
   $output = @()
   if ($standardOutput.Length -gt 0) {
@@ -989,6 +993,325 @@ function Save-HarmonyScreenshot {
   }
 }
 
+function Resolve-HarmonyCaptureSchedule {
+  [CmdletBinding()]
+  param(
+    [int[]]$CaptureAtMs = @(),
+
+    [Nullable[int]]$CaptureIntervalMs,
+
+    [Nullable[int]]$FrameCount,
+
+    [ValidateRange(0, 3600000)]
+    [int]$RecordDurationMs = 0,
+
+    [ValidateRange(1, 60)]
+    [int]$MaxFrames = 12,
+
+    [switch]$CaptureBefore
+  )
+
+  $explicitTimes = @($CaptureAtMs)
+  $modeCount = 0
+  if ($explicitTimes.Count -gt 0) { $modeCount += 1 }
+  if ($null -ne $CaptureIntervalMs) { $modeCount += 1 }
+  if ($null -ne $FrameCount) { $modeCount += 1 }
+  if ($modeCount -ne 1) {
+    throw 'Specify exactly one capture schedule: CaptureAtMs, CaptureIntervalMs, or FrameCount.'
+  }
+
+  $mode = ''
+  $times = @()
+  if ($explicitTimes.Count -gt 0) {
+    $mode = 'explicit'
+    foreach ($timePoint in $explicitTimes) {
+      if ($timePoint -lt 0 -or $timePoint -gt 3600000) {
+        throw "Invalid capture time point: ${timePoint}ms"
+      }
+    }
+    $times = @($explicitTimes | Sort-Object -Unique)
+    if ($RecordDurationMs -eq 0) {
+      $RecordDurationMs = [int]($times | Measure-Object -Maximum).Maximum
+    }
+  } elseif ($null -ne $CaptureIntervalMs) {
+    $mode = 'interval'
+    $intervalMs = [int]$CaptureIntervalMs
+    if ($intervalMs -lt 50 -or $intervalMs -gt 60000) {
+      throw 'CaptureIntervalMs must be between 50 and 60000.'
+    }
+    if ($RecordDurationMs -le 0) {
+      throw 'RecordDurationMs must be greater than zero for interval capture.'
+    }
+    for ($timePoint = 0; $timePoint -le $RecordDurationMs; $timePoint += $intervalMs) {
+      $times += $timePoint
+    }
+    if ($times[$times.Count - 1] -ne $RecordDurationMs) {
+      $times += $RecordDurationMs
+    }
+  } else {
+    $mode = 'frameCount'
+    $resolvedFrameCount = [int]$FrameCount
+    if ($resolvedFrameCount -lt 1 -or $resolvedFrameCount -gt 60) {
+      throw 'FrameCount must be between 1 and 60.'
+    }
+    if ($RecordDurationMs -le 0 -and $resolvedFrameCount -gt 1) {
+      throw 'RecordDurationMs must be greater than zero when FrameCount is greater than one.'
+    }
+    if ($resolvedFrameCount -eq 1) {
+      $times = @(0)
+    } else {
+      for ($index = 0; $index -lt $resolvedFrameCount; $index += 1) {
+        $times += [int][Math]::Round($index * $RecordDurationMs / [double]($resolvedFrameCount - 1))
+      }
+      $times = @($times | Sort-Object -Unique)
+    }
+  }
+
+  $totalFrames = $times.Count + $(if ($CaptureBefore) { 1 } else { 0 })
+  if ($totalFrames -gt $MaxFrames) {
+    throw "Capture schedule requests ${totalFrames} frames, exceeding MaxFrames=${MaxFrames}."
+  }
+  return [pscustomobject]@{
+    mode = $mode
+    times = $times
+    recordDurationMs = $RecordDurationMs
+    captureBefore = [bool]$CaptureBefore
+    requestedFrames = $totalFrames
+    maxFrames = $MaxFrames
+  }
+}
+
+function Invoke-HarmonyInteractionTrace {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ActionFilePath,
+
+    [string[]]$ActionArgumentList = @(),
+
+    [int[]]$CaptureAtMs = @(),
+
+    [Nullable[int]]$CaptureIntervalMs,
+
+    [Nullable[int]]$FrameCount,
+
+    [ValidateRange(0, 3600000)]
+    [int]$RecordDurationMs = 0,
+
+    [switch]$CaptureBefore,
+
+    [ValidateRange(1, 60)]
+    [int]$MaxFrames = 12,
+
+    [ValidateRange(1, 4)]
+    [int]$MaxConcurrency = 2,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputDirectory,
+
+    [string]$Prefix = 'trace',
+
+    [string]$Target = '',
+
+    [string]$HdcPath = 'hdc',
+
+    [switch]$DryRun
+  )
+
+  $scheduleParameters = @{
+    CaptureAtMs = $CaptureAtMs
+    RecordDurationMs = $RecordDurationMs
+    MaxFrames = $MaxFrames
+    CaptureBefore = $CaptureBefore
+  }
+  if ($null -ne $CaptureIntervalMs) { $scheduleParameters.CaptureIntervalMs = $CaptureIntervalMs }
+  if ($null -ne $FrameCount) { $scheduleParameters.FrameCount = $FrameCount }
+  $schedule = Resolve-HarmonyCaptureSchedule @scheduleParameters
+  $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+  $absoluteOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+  if (-not $DryRun) {
+    [void](New-Item -ItemType Directory -Path $absoluteOutputDirectory -Force)
+  }
+
+  $runId = [Guid]::NewGuid().ToString('N')
+  $frames = @()
+  $droppedFrames = @()
+  if ($schedule.captureBefore) {
+    $beforeName = "${Prefix}-before.jpeg"
+    if ($DryRun) {
+      $frames += [pscustomobject]@{
+        index = 0; phase = 'before'; requestedAtMs = $null; actualStartMs = $null
+        completedAtMs = $null; latenessMs = 0
+        path = (Join-Path $absoluteOutputDirectory $beforeName)
+      }
+    } else {
+      $before = Save-HarmonyScreenshot -OutputPath (Join-Path $absoluteOutputDirectory $beforeName) `
+        -Target $resolvedTarget -HdcPath $HdcPath
+      $frames += [pscustomobject]@{
+        index = 0; phase = 'before'; requestedAtMs = $null; actualStartMs = $null
+        completedAtMs = $null; latenessMs = 0; path = $before.path
+      }
+    }
+  }
+
+  if ($DryRun) {
+    for ($index = 0; $index -lt $schedule.times.Count; $index += 1) {
+      $timePoint = $schedule.times[$index]
+      $frameIndex = $frames.Count
+      $name = '{0}-{1:D4}ms-{2:D2}.jpeg' -f $Prefix, $timePoint, $frameIndex
+      $frames += [pscustomobject]@{
+        index = $frameIndex; phase = 'during'; requestedAtMs = $timePoint
+        actualStartMs = $timePoint; completedAtMs = $timePoint; latenessMs = 0
+        path = (Join-Path $absoluteOutputDirectory $name)
+      }
+    }
+    return [pscustomobject]@{
+      action = 'interactionTrace'
+      target = $resolvedTarget
+      actionCommand = ConvertTo-CommandDisplay -FilePath $ActionFilePath -ArgumentList $ActionArgumentList
+      schedule = $schedule
+      frames = $frames
+      droppedFrames = @()
+      capturedFrames = $frames.Count
+      maxLatenessMs = 0
+      maxConcurrency = $MaxConcurrency
+      elapsedMs = 0
+      actionResult = $null
+      manifestPath = (Join-Path $absoluteOutputDirectory 'frames.json')
+      dryRun = $true
+    }
+  }
+
+  $action = $null
+  $timeline = [System.Diagnostics.Stopwatch]::StartNew()
+  $scheduledCaptures = @()
+  try {
+    $action = Start-NativeCommand -FilePath $ActionFilePath -ArgumentList $ActionArgumentList
+    for ($index = 0; $index -lt $schedule.times.Count; $index += 1) {
+      $timePoint = $schedule.times[$index]
+      Wait-HarmonyTimeline -Stopwatch $timeline -AtMs $timePoint
+
+      foreach ($pending in @($scheduledCaptures | Where-Object {
+        $null -eq $_.captureResult -and $_.running.process.HasExited
+      })) {
+        $pending.captureResult = Complete-NativeCommand -RunningCommand $pending.running
+        $pending.completedAtMs = [int]$timeline.ElapsedMilliseconds
+      }
+      $activeCount = @($scheduledCaptures | Where-Object { $null -eq $_.captureResult }).Count
+      if ($activeCount -ge $MaxConcurrency) {
+        $droppedFrames += [pscustomobject]@{
+          requestedAtMs = $timePoint
+          reason = 'capture-concurrency-limit'
+        }
+        continue
+      }
+
+      $frameIndex = $frames.Count + $scheduledCaptures.Count
+      $name = '{0}-{1:D4}ms-{2:D2}.jpeg' -f $Prefix, $timePoint, $frameIndex
+      $paths = New-ScreenshotPaths -OutputPath (Join-Path $absoluteOutputDirectory $name) `
+        -RunId "${runId}-${frameIndex}"
+      $captureArguments = Get-HdcArguments -Target $resolvedTarget `
+        -CommandArguments @('shell', 'snapshot_display', '-f', $paths.remote)
+      $actualStartMs = [int]$timeline.ElapsedMilliseconds
+      $scheduledCaptures += [pscustomobject]@{
+        index = $frameIndex
+        requestedAtMs = $timePoint
+        actualStartMs = $actualStartMs
+        completedAtMs = $null
+        path = $paths.local
+        remotePath = $paths.remote
+        running = Start-NativeCommand -FilePath $HdcPath -ArgumentList $captureArguments
+        captureResult = $null
+      }
+    }
+
+    $actionResult = Complete-NativeCommand -RunningCommand $action
+    foreach ($scheduled in $scheduledCaptures) {
+      if ($null -eq $scheduled.captureResult) {
+        $scheduled.captureResult = Complete-NativeCommand -RunningCommand $scheduled.running
+        $scheduled.completedAtMs = [int]$timeline.ElapsedMilliseconds
+      }
+      [void](Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
+        -CommandArguments @('file', 'recv', $scheduled.remotePath, $scheduled.path))
+      [void](Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath -AllowFailure `
+        -CommandArguments @('shell', 'rm', '-f', $scheduled.remotePath))
+      if (-not (Test-Path -LiteralPath $scheduled.path) -or
+        (Get-Item -LiteralPath $scheduled.path).Length -le 0) {
+        throw "Interaction trace screenshot was not received: $($scheduled.path)"
+      }
+      $frames += [pscustomobject]@{
+        index = $scheduled.index
+        phase = 'during'
+        requestedAtMs = $scheduled.requestedAtMs
+        actualStartMs = $scheduled.actualStartMs
+        completedAtMs = $scheduled.completedAtMs
+        latenessMs = $scheduled.actualStartMs - $scheduled.requestedAtMs
+        path = $scheduled.path
+      }
+    }
+  } catch {
+    if ($null -ne $action) {
+      try {
+        if (-not $action.process.HasExited) { $action.process.Kill() }
+        [void](Complete-NativeCommand -RunningCommand $action -AllowFailure)
+      } catch {
+        $action.stopwatch.Stop()
+        $action.process.Dispose()
+      }
+    }
+    foreach ($scheduled in $scheduledCaptures) {
+      if ($null -ne $scheduled.running) {
+        try {
+          if (-not $scheduled.running.process.HasExited) { $scheduled.running.process.Kill() }
+          [void](Complete-NativeCommand -RunningCommand $scheduled.running -AllowFailure)
+        } catch {
+          $scheduled.running.stopwatch.Stop()
+          $scheduled.running.process.Dispose()
+        }
+      }
+      [void](Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath -AllowFailure `
+        -CommandArguments @('shell', 'rm', '-f', $scheduled.remotePath))
+    }
+    throw
+  } finally {
+    $timeline.Stop()
+  }
+
+  $maxLateness = 0
+  $duringFrames = @($frames | Where-Object { $null -ne $_.requestedAtMs })
+  if ($duringFrames.Count -gt 0) {
+    $maxLateness = [int]($duringFrames | Measure-Object latenessMs -Maximum).Maximum
+  }
+  $sortedFrames = @($frames | Sort-Object index)
+  $manifestPath = Join-Path $absoluteOutputDirectory 'frames.json'
+  $manifest = [ordered]@{
+    version = 1
+    schedule = $schedule
+    frames = $sortedFrames
+    droppedFrames = $droppedFrames
+    maxLatenessMs = $maxLateness
+  }
+  [System.IO.File]::WriteAllText(
+    $manifestPath,
+    ($manifest | ConvertTo-Json -Depth 10),
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+  return [pscustomobject]@{
+    action = 'interactionTrace'
+    target = $resolvedTarget
+    schedule = $schedule
+    frames = $sortedFrames
+    droppedFrames = $droppedFrames
+    capturedFrames = $frames.Count
+    maxLatenessMs = $maxLateness
+    maxConcurrency = $MaxConcurrency
+    elapsedMs = [int]$timeline.ElapsedMilliseconds
+    actionResult = $actionResult
+    manifestPath = $manifestPath
+    dryRun = $false
+  }
+}
+
 function Invoke-HarmonyGestureCapture {
   [CmdletBinding()]
   param(
@@ -1010,8 +1333,22 @@ function Invoke-HarmonyGestureCapture {
     [ValidateRange(0, 60000)]
     [int]$KeepMs = 0,
 
-    [Parameter(Mandatory = $true)]
-    [int[]]$CaptureAtMs,
+    [int[]]$CaptureAtMs = @(),
+
+    [Nullable[int]]$CaptureIntervalMs,
+
+    [Nullable[int]]$FrameCount,
+
+    [ValidateRange(0, 3600000)]
+    [int]$RecordDurationMs = 0,
+
+    [switch]$CaptureBefore,
+
+    [ValidateRange(1, 60)]
+    [int]$MaxFrames = 12,
+
+    [ValidateRange(1, 4)]
+    [int]$MaxConcurrency = 2,
 
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
@@ -1025,21 +1362,7 @@ function Invoke-HarmonyGestureCapture {
     [switch]$DryRun
   )
 
-  if ($CaptureAtMs.Count -eq 0) {
-    throw 'CaptureAtMs must contain at least one time point.'
-  }
-  foreach ($timePoint in $CaptureAtMs) {
-    if ($timePoint -lt 0 -or $timePoint -gt 3600000) {
-      throw "Invalid capture time point: ${timePoint}ms"
-    }
-  }
-
   $resolvedTarget = Get-HarmonyCommandTarget -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
-  $absoluteOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
-  if (-not $DryRun) {
-    [void](New-Item -ItemType Directory -Path $absoluteOutputDirectory -Force)
-  }
-
   $touchArguments = @(
     'shell', 'uinput', '-T', '-m',
     "$StartX", "$StartY", "$EndX", "$EndY"
@@ -1049,120 +1372,45 @@ function Invoke-HarmonyGestureCapture {
   }
   $touchArguments += "$DurationMs"
   $hdcTouchArguments = Get-HdcArguments -Target $resolvedTarget -CommandArguments $touchArguments
-
-  $orderedTimes = @($CaptureAtMs | Sort-Object)
-  $runId = [Guid]::NewGuid().ToString('N')
-  $scheduledCaptures = @()
-
-  if ($DryRun) {
-    for ($index = 0; $index -lt $orderedTimes.Count; $index += 1) {
-      $timePoint = $orderedTimes[$index]
-      $name = '{0}-{1:D4}ms-{2:D2}.jpeg' -f $Prefix, $timePoint, $index
-      $paths = New-ScreenshotPaths -OutputPath (Join-Path $absoluteOutputDirectory $name) `
-        -RunId "${runId}-${index}"
-      $scheduledCaptures += [pscustomobject]@{
-        requestedAtMs = $timePoint
-        actualStartMs = $timePoint
-        path = $paths.local
-        remotePath = $paths.remote
-        command = ConvertTo-CommandDisplay -FilePath $HdcPath -ArgumentList (
-          Get-HdcArguments -Target $resolvedTarget `
-            -CommandArguments @('shell', 'snapshot_display', '-f', $paths.remote)
-        )
-      }
-    }
-
-    return [pscustomobject]@{
-      action = 'gestureCapture'
-      target = $resolvedTarget
-      gestureCommand = ConvertTo-CommandDisplay -FilePath $HdcPath -ArgumentList $hdcTouchArguments
-      durationMs = $DurationMs
-      keepMs = $KeepMs
-      captures = $scheduledCaptures
-      artifacts = @($scheduledCaptures | ForEach-Object {
-        [pscustomobject]@{ type = 'image'; path = $_.path; requestedAtMs = $_.requestedAtMs }
-      })
-      dryRun = $true
-    }
+  if ($RecordDurationMs -eq 0) {
+    $RecordDurationMs = $DurationMs + $KeepMs
   }
-
-  $timeline = [System.Diagnostics.Stopwatch]::StartNew()
-  $gesture = Start-NativeCommand -FilePath $HdcPath -ArgumentList $hdcTouchArguments
-  try {
-    for ($index = 0; $index -lt $orderedTimes.Count; $index += 1) {
-      $timePoint = $orderedTimes[$index]
-      Wait-HarmonyTimeline -Stopwatch $timeline -AtMs $timePoint
-      $name = '{0}-{1:D4}ms-{2:D2}.jpeg' -f $Prefix, $timePoint, $index
-      $paths = New-ScreenshotPaths -OutputPath (Join-Path $absoluteOutputDirectory $name) `
-        -RunId "${runId}-${index}"
-      $captureArguments = Get-HdcArguments -Target $resolvedTarget `
-        -CommandArguments @('shell', 'snapshot_display', '-f', $paths.remote)
-      $actualStartMs = [int]$timeline.ElapsedMilliseconds
-      $runningCapture = Start-NativeCommand -FilePath $HdcPath -ArgumentList $captureArguments
-      $scheduledCaptures += [pscustomobject]@{
-        requestedAtMs = $timePoint
-        actualStartMs = $actualStartMs
-        path = $paths.local
-        remotePath = $paths.remote
-        running = $runningCapture
-      }
-    }
-
-    $gestureResult = Complete-NativeCommand -RunningCommand $gesture
-    $completedCaptures = @()
-    foreach ($scheduled in $scheduledCaptures) {
-      $captureResult = Complete-NativeCommand -RunningCommand $scheduled.running
-      $receiveResult = Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath `
-        -CommandArguments @('file', 'recv', $scheduled.remotePath, $scheduled.path)
-      [void](Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath -AllowFailure `
-        -CommandArguments @('shell', 'rm', '-f', $scheduled.remotePath))
-      if (-not (Test-Path -LiteralPath $scheduled.path) -or
-        (Get-Item -LiteralPath $scheduled.path).Length -le 0) {
-        throw "Gesture screenshot was not received: $($scheduled.path)"
-      }
-      $completedCaptures += [pscustomobject]@{
-        requestedAtMs = $scheduled.requestedAtMs
-        actualStartMs = $scheduled.actualStartMs
-        latenessMs = $scheduled.actualStartMs - $scheduled.requestedAtMs
-        path = $scheduled.path
-        capture = $captureResult
-        receive = $receiveResult
-      }
-    }
-  } catch {
-    if (-not $gesture.process.HasExited) {
-      $gesture.process.Kill()
-    }
-    foreach ($scheduled in $scheduledCaptures) {
-      if ($null -ne $scheduled.running -and -not $scheduled.running.process.HasExited) {
-        $scheduled.running.process.Kill()
-      }
-      [void](Invoke-HarmonyHdc -Target $resolvedTarget -HdcPath $HdcPath -AllowFailure `
-        -CommandArguments @('shell', 'rm', '-f', $scheduled.remotePath))
-    }
-    throw
-  } finally {
-    $timeline.Stop()
+  $traceParameters = @{
+    ActionFilePath = $HdcPath
+    ActionArgumentList = $hdcTouchArguments
+    CaptureAtMs = $CaptureAtMs
+    RecordDurationMs = $RecordDurationMs
+    CaptureBefore = $CaptureBefore
+    MaxFrames = $MaxFrames
+    MaxConcurrency = $MaxConcurrency
+    OutputDirectory = $OutputDirectory
+    Prefix = $Prefix
+    Target = $resolvedTarget
+    HdcPath = $HdcPath
+    DryRun = $DryRun
   }
-
+  if ($null -ne $CaptureIntervalMs) { $traceParameters.CaptureIntervalMs = $CaptureIntervalMs }
+  if ($null -ne $FrameCount) { $traceParameters.FrameCount = $FrameCount }
+  $trace = Invoke-HarmonyInteractionTrace @traceParameters
   return [pscustomobject]@{
     action = 'gestureCapture'
     target = $resolvedTarget
-    gesture = $gestureResult
     durationMs = $DurationMs
     keepMs = $KeepMs
-    elapsedMs = [int]$timeline.ElapsedMilliseconds
-    captures = $completedCaptures
-    artifacts = @($completedCaptures | ForEach-Object {
+    schedule = $trace.schedule
+    captures = $trace.frames
+    droppedFrames = $trace.droppedFrames
+    maxLatenessMs = $trace.maxLatenessMs
+    elapsedMs = $trace.elapsedMs
+    manifestPath = $trace.manifestPath
+    artifacts = @($trace.frames | ForEach-Object {
       [pscustomobject]@{
-        type = 'image'
-        path = $_.path
-        requestedAtMs = $_.requestedAtMs
-        actualStartMs = $_.actualStartMs
+        type = 'image'; path = $_.path; phase = $_.phase
+        requestedAtMs = $_.requestedAtMs; actualStartMs = $_.actualStartMs
         latenessMs = $_.latenessMs
       }
     })
-    dryRun = $false
+    dryRun = [bool]$DryRun
   }
 }
 
@@ -1896,6 +2144,8 @@ Export-ModuleMember -Function @(
   'Send-HarmonyTap',
   'Send-HarmonySwipe',
   'Save-HarmonyScreenshot',
+  'Resolve-HarmonyCaptureSchedule',
+  'Invoke-HarmonyInteractionTrace',
   'Invoke-HarmonyGestureCapture',
   'Invoke-HarmonyScenario',
   'Build-HarmonyProject',

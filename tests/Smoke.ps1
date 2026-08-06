@@ -30,6 +30,7 @@ foreach ($fixturePath in @(
   [void](New-Item -ItemType File -Path $fixturePath -Force)
 }
 $cli = Join-Path $toolRoot 'hdc-agent.cmd'
+Import-Module (Join-Path $toolRoot 'HdcAgentTools.psm1') -Force -DisableNameChecking
 
 function Assert-True {
   param(
@@ -72,6 +73,18 @@ function Invoke-CliFailure {
     output = $output -join [Environment]::NewLine
   }
 }
+
+$module = Get-Module HdcAgentTools
+$currentPowerShell = (Get-Process -Id $PID).Path
+$largeOutput = & $module {
+  param($Executable)
+  $running = Start-NativeCommand -FilePath $Executable `
+    -ArgumentList @('-NoProfile', '-Command', '[Console]::Out.Write((''x'' * 200000))')
+  Complete-NativeCommand -RunningCommand $running
+} $currentPowerShell
+Assert-True (
+  $largeOutput.exitCode -eq 0 -and (($largeOutput.output -join '').Length -eq 200000)
+) 'asynchronous native output draining failed for a large child-process payload.'
 
 $tap = Invoke-CliJson @('tap', '-X', '100', '-Y', '200', '-DryRun')
 Assert-True ($tap.action -eq 'tap' -and $tap.command.dryRun) 'tap dry-run failed.'
@@ -129,6 +142,55 @@ $gesture = Invoke-CliJson @(
 )
 Assert-True ($gesture.action -eq 'gestureCapture' -and $gesture.captures.Count -eq 3) `
   'gesture-capture CSV time-point parsing failed.'
+
+$intervalGesture = Invoke-CliJson @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-CaptureIntervalMs', '125', '-RecordDurationMs', '500',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\interval-smoke'), '-DryRun'
+)
+Assert-True (
+  $intervalGesture.schedule.mode -eq 'interval' -and $intervalGesture.captures.Count -eq 5
+) 'gesture interval capture schedule failed.'
+
+$countGesture = Invoke-CliJson @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-FrameCount', '4', '-RecordDurationMs', '600', '-CaptureBefore',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\count-smoke'), '-DryRun'
+)
+Assert-True (
+  $countGesture.schedule.mode -eq 'frameCount' -and $countGesture.captures.Count -eq 5 -and
+  $countGesture.captures[0].phase -eq 'before'
+) 'gesture frame-count capture schedule failed.'
+
+$oversizedSchedule = Invoke-CliFailure @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-CaptureIntervalMs', '50', '-RecordDurationMs', '1000', '-MaxFrames', '10',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\limit-smoke'), '-DryRun'
+)
+Assert-True ($oversizedSchedule.exitCode -ne 0 -and $oversizedSchedule.output -match 'MaxFrames') `
+  'capture frame limit was not enforced.'
+
+$deduplicatedGesture = Invoke-CliJson @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-CaptureAtMs', '0,0,100,100',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\dedupe-smoke'), '-DryRun'
+)
+Assert-True ($deduplicatedGesture.captures.Count -eq 2) 'duplicate capture times were not removed.'
+
+$conflictingSchedule = Invoke-CliFailure @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-CaptureAtMs', '0,100', '-FrameCount', '3',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\conflict-smoke'), '-DryRun'
+)
+Assert-True ($conflictingSchedule.exitCode -ne 0 -and $conflictingSchedule.output -match 'exactly one capture schedule') `
+  'conflicting capture schedules were not rejected.'
+
+$postRollGesture = Invoke-CliJson @(
+  'gesture-capture', '-StartX', '100', '-StartY', '500', '-EndX', '100', '-EndY', '200',
+  '-DurationMs', '500', '-FrameCount', '3', '-PostRollMs', '200',
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\post-roll-smoke'), '-DryRun'
+)
+Assert-True ($postRollGesture.schedule.recordDurationMs -eq 700) 'gesture post-roll was not added.'
 
 $build = Invoke-CliJson @(
   'build', '-ProjectRoot', $repositoryRoot, '-Product', 'default', '-BuildMode', 'debug',
@@ -262,6 +324,17 @@ Assert-True (
   $formFactorScenario.events[5].result.action -eq 'waitDisplay'
 ) 'form-factor scenario dry-run failed.'
 
+$tracedScenario = Invoke-CliJson @(
+  'trace-scenario', '-ScenarioPath', $example,
+  '-OutputDirectory', (Join-Path $toolRoot 'artifacts\trace-scenario-smoke'),
+  '-FrameCount', '3', '-RecordDurationMs', '1000', '-CaptureBefore',
+  '-ContactSheetPath', (Join-Path $toolRoot 'artifacts\trace-scenario-smoke\sheet.jpg'), '-DryRun'
+)
+Assert-True (
+  $tracedScenario.action -eq 'interactionTrace' -and $tracedScenario.frames.Count -eq 4 -and
+  $tracedScenario.actionCommand -match 'hdc-agent\.ps1 scenario' -and $tracedScenario.contactSheet.planned
+) 'scenario interaction trace dry-run failed.'
+
 $fakeHdc = Join-Path $toolRoot 'artifacts\fake-hdc.cmd'
 @'
 @echo off
@@ -301,6 +374,8 @@ $baselinePath = Join-Path $imageDirectory 'baseline.png'
 $actualPath = Join-Path $imageDirectory 'actual.png'
 $cropPath = Join-Path $imageDirectory 'crop.png'
 $differencePath = Join-Path $imageDirectory 'difference.png'
+$resizedPath = Join-Path $imageDirectory 'resized.jpg'
+$contactSheetPath = Join-Path $imageDirectory 'contact-sheet.jpg'
 $bitmap = New-Object System.Drawing.Bitmap(8, 8)
 try {
   $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -324,6 +399,20 @@ $crop = Invoke-CliJson @(
 )
 Assert-True ($crop.rectangle.width -eq 4 -and (Test-Path -LiteralPath $crop.path)) `
   'image crop failed.'
+
+$resized = Invoke-CliJson @(
+  'resize-image', '-ImagePath', $baselinePath, '-OutputPath', $resizedPath,
+  '-MaxWidth', '64', '-MaxHeight', '64'
+)
+Assert-True ($resized.width -eq 8 -and (Test-Path -LiteralPath $resized.path)) `
+  'image resize failed.'
+
+$sheet = Invoke-CliJson @(
+  'contact-sheet', '-ImagePaths', "${baselinePath},${actualPath}",
+  '-Labels', 'before,after', '-OutputPath', $contactSheetPath, '-ContactSheetColumns', '2'
+)
+Assert-True ($sheet.sourceCount -eq 2 -and $sheet.columns -eq 2 -and (Test-Path -LiteralPath $sheet.path)) `
+  'contact sheet generation failed.'
 
 $comparison = Invoke-CliJson @(
   'compare-images', '-BaselinePath', $baselinePath, '-ActualPath', $actualPath,
@@ -377,6 +466,6 @@ Assert-True (($invalidOutput -join [Environment]::NewLine) -match '\.jpg or \.jp
 
 [pscustomobject]@{
   result = 'PASS'
-  checks = 37
+  checks = 48
   deviceRequired = $false
 } | ConvertTo-Json

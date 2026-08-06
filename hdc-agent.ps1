@@ -13,9 +13,12 @@ param(
     'swipe',
     'screenshot',
     'gesture-capture',
+    'trace-scenario',
     'scenario',
     'image-info',
     'crop-image',
+    'resize-image',
+    'contact-sheet',
     'compare-images',
     'assert-image',
     'test-local',
@@ -64,9 +67,25 @@ param(
   [string]$Prefix = 'gesture',
   [int]$DelayMs = 0,
   [string[]]$CaptureAtMs = @(),
+  [Nullable[int]]$CaptureIntervalMs,
+  [Nullable[int]]$FrameCount,
+  [ValidateRange(1, 3600000)]
+  [int]$RecordDurationMs = 3000,
+  [ValidateRange(0, 60000)]
+  [int]$PostRollMs = 0,
+  [switch]$CaptureBefore,
+  [ValidateRange(1, 60)]
+  [int]$MaxFrames = 12,
+  [ValidateRange(1, 4)]
+  [int]$MaxCaptureConcurrency = 2,
+  [string]$ContactSheetPath = '',
+  [ValidateRange(0, 12)]
+  [int]$ContactSheetColumns = 0,
   [string]$ScenarioPath = '',
 
   [string]$ImagePath = '',
+  [string[]]$ImagePaths = @(),
+  [string[]]$Labels = @(),
   [string]$BaselinePath = '',
   [string]$ActualPath = '',
   [string]$DifferencePath = '',
@@ -74,6 +93,10 @@ param(
   [int]$CropY,
   [int]$CropWidth,
   [int]$CropHeight,
+  [ValidateRange(64, 4096)]
+  [int]$MaxWidth = 960,
+  [ValidateRange(64, 4096)]
+  [int]$MaxHeight = 1600,
   [ValidateRange(0, 255)]
   [int]$PixelTolerance = 0,
   [ValidateRange(0.0, 1.0)]
@@ -222,7 +245,7 @@ function Resolve-InputPoint {
 try {
   $PSBoundParametersFromCli = $PSBoundParameters
   $deviceCommands = @(
-    'display', 'wait-display', 'fold', 'rotate', 'tap', 'swipe', 'screenshot', 'gesture-capture', 'scenario',
+    'display', 'wait-display', 'fold', 'rotate', 'tap', 'swipe', 'screenshot', 'gesture-capture', 'trace-scenario', 'scenario',
     'install', 'start', 'stop', 'logs', 'deploy', 'test-device'
   )
   if ($Command -in $deviceCommands -and $EmulatorName.Length -gt 0) {
@@ -320,10 +343,59 @@ try {
       if ($startPoint.normalized -ne $endPoint.normalized) {
         throw 'Gesture start and end must both use pixels or both use normalized coordinates.'
       }
-      $result = Invoke-HarmonyGestureCapture -StartX $startPoint.x -StartY $startPoint.y `
-        -EndX $endPoint.x -EndY $endPoint.y -DurationMs $DurationMs -KeepMs $KeepMs `
-        -CaptureAtMs $captureTimes -OutputDirectory $OutputDirectory -Prefix $Prefix `
-        -Target $Target -HdcPath $HdcPath -DryRun:$DryRun
+      $parameters = @{
+        StartX = $startPoint.x; StartY = $startPoint.y; EndX = $endPoint.x; EndY = $endPoint.y
+        DurationMs = $DurationMs; KeepMs = $KeepMs
+        OutputDirectory = $OutputDirectory; Prefix = $Prefix; Target = $Target; HdcPath = $HdcPath
+        CaptureBefore = $CaptureBefore; MaxFrames = $MaxFrames; MaxConcurrency = $MaxCaptureConcurrency
+        DryRun = $DryRun
+      }
+      if ($null -ne $captureTimes -and $captureTimes.Count -gt 0) { $parameters.CaptureAtMs = $captureTimes }
+      if ($PSBoundParametersFromCli.ContainsKey('CaptureIntervalMs')) { $parameters.CaptureIntervalMs = $CaptureIntervalMs }
+      if ($PSBoundParametersFromCli.ContainsKey('FrameCount')) { $parameters.FrameCount = $FrameCount }
+      if ($PSBoundParametersFromCli.ContainsKey('RecordDurationMs')) { $parameters.RecordDurationMs = $RecordDurationMs }
+      if ($PostRollMs -gt 0) {
+        $baseDuration = if ($parameters.ContainsKey('RecordDurationMs')) { [int]$parameters.RecordDurationMs } else { $DurationMs + $KeepMs }
+        $parameters.RecordDurationMs = $baseDuration + $PostRollMs
+      }
+      $result = Invoke-HarmonyGestureCapture @parameters
+      if ($ContactSheetPath.Length -gt 0) {
+        if ($DryRun) {
+          $result | Add-Member -NotePropertyName contactSheet -NotePropertyValue ([pscustomobject]@{ path = [System.IO.Path]::GetFullPath($ContactSheetPath); planned = $true })
+        } else {
+          $labels = @($result.captures | ForEach-Object { if ($_.phase -eq 'before') { 'before' } else { "frame $($_.index) req=$($_.requestedAtMs)ms actual=$($_.actualStartMs)ms" } })
+          $sheet = New-AgentContactSheet -ImagePath @($result.captures.path) -Label $labels `
+            -OutputPath $ContactSheetPath -Columns $ContactSheetColumns
+          $result | Add-Member -NotePropertyName contactSheet -NotePropertyValue $sheet
+        }
+      }
+    }
+    'trace-scenario' {
+      Require-Value -Name 'ScenarioPath' -Value $ScenarioPath
+      Require-Value -Name 'OutputDirectory' -Value $OutputDirectory
+      $captureTimes = ConvertTo-TimePoints -Values $CaptureAtMs
+      $actionArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, 'scenario', '-ScenarioPath', $ScenarioPath, '-OutputDirectory', (Join-Path $OutputDirectory 'scenario'), '-HdcPath', $HdcPath)
+      if ($Target.Length -gt 0) { $actionArguments += @('-Target', $Target) }
+      $parameters = @{
+        ActionFilePath = (Join-Path $PSHOME 'powershell.exe'); ActionArgumentList = $actionArguments
+        RecordDurationMs = ($RecordDurationMs + $PostRollMs); CaptureBefore = $CaptureBefore
+        MaxFrames = $MaxFrames; MaxConcurrency = $MaxCaptureConcurrency; OutputDirectory = $OutputDirectory
+        Prefix = $Prefix; Target = $Target; HdcPath = $HdcPath; DryRun = $DryRun
+      }
+      if ($null -ne $captureTimes -and $captureTimes.Count -gt 0) { $parameters.CaptureAtMs = $captureTimes }
+      if ($PSBoundParametersFromCli.ContainsKey('CaptureIntervalMs')) { $parameters.CaptureIntervalMs = $CaptureIntervalMs }
+      if ($PSBoundParametersFromCli.ContainsKey('FrameCount')) { $parameters.FrameCount = $FrameCount }
+      $result = Invoke-HarmonyInteractionTrace @parameters
+      if ($ContactSheetPath.Length -gt 0) {
+        if ($DryRun) {
+          $result | Add-Member -NotePropertyName contactSheet -NotePropertyValue ([pscustomobject]@{ path = [System.IO.Path]::GetFullPath($ContactSheetPath); planned = $true })
+        } else {
+          $labels = @($result.frames | ForEach-Object { if ($_.phase -eq 'before') { 'before' } else { "frame $($_.index) req=$($_.requestedAtMs)ms actual=$($_.actualStartMs)ms" } })
+          $sheet = New-AgentContactSheet -ImagePath @($result.frames.path) -Label $labels `
+            -OutputPath $ContactSheetPath -Columns $ContactSheetColumns
+          $result | Add-Member -NotePropertyName contactSheet -NotePropertyValue $sheet
+        }
+      }
     }
     'scenario' {
       Require-Value -Name 'ScenarioPath' -Value $ScenarioPath
@@ -345,6 +417,20 @@ try {
       }
       $result = Crop-AgentImage -ImagePath $ImagePath -OutputPath $OutputPath `
         -X $CropX -Y $CropY -Width $CropWidth -Height $CropHeight
+    }
+    'resize-image' {
+      Require-Value -Name 'ImagePath' -Value $ImagePath
+      Require-Value -Name 'OutputPath' -Value $OutputPath
+      $result = Resize-AgentImage -ImagePath $ImagePath -OutputPath $OutputPath `
+        -MaxWidth $MaxWidth -MaxHeight $MaxHeight
+    }
+    'contact-sheet' {
+      Require-Value -Name 'OutputPath' -Value $OutputPath
+      $resolvedImagePaths = @($ImagePaths | ForEach-Object { $_ -split ',' } | Where-Object { $_.Length -gt 0 })
+      $resolvedLabels = @($Labels | ForEach-Object { $_ -split ',' })
+      if ($resolvedImagePaths.Count -eq 0) { throw "-ImagePaths is required for command '${Command}'." }
+      $result = New-AgentContactSheet -ImagePath $resolvedImagePaths -Label $resolvedLabels `
+        -OutputPath $OutputPath -Columns $ContactSheetColumns
     }
     'compare-images' {
       Require-Value -Name 'BaselinePath' -Value $BaselinePath

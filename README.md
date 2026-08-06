@@ -178,6 +178,25 @@ Each returned artifact reports:
 
 This makes timing drift visible instead of pretending frame capture is exact.
 
+Capture schedules are mutually exclusive: use explicit `-CaptureAtMs`, periodic `-CaptureIntervalMs`, or a bounded
+`-FrameCount`. Interval and frame-count modes use `-RecordDurationMs`; `-CaptureBefore` adds a pre-action frame,
+`-PostRollMs` extends the window, and `-MaxFrames` (default 12) prevents unbounded capture. At most
+`-MaxCaptureConcurrency` snapshot processes run at once; excess sampling points are reported as dropped frames.
+
+To observe a complete multi-step scenario instead of one swipe, use the same coordinator through `trace-scenario`:
+
+```powershell
+./hdc-agent.cmd trace-scenario `
+  -ScenarioPath ./examples/tap-and-capture.json `
+  -Target 127.0.0.1:5555 `
+  -FrameCount 8 -RecordDurationMs 3000 -CaptureBefore `
+  -OutputDirectory ./artifacts/trace `
+  -ContactSheetPath ./artifacts/trace/contact-sheet.jpg
+```
+
+Original frames and `frames.json` remain under the output directory. The optional labelled contact sheet is bounded
+to a 4096-by-4096 image by default, so agents can inspect motion with one image while retaining source evidence.
+
 ## Self-test
 
 The smoke test exercises portable command paths in dry-run mode, package discovery, scenario validation, CSV
@@ -239,7 +258,7 @@ dimensions. See `examples/form-factor-cycle.json` for a complete sequence.
 
 ## Image inspection and visual assertions
 
-Inspect and crop an image:
+Inspect, crop, resize, or combine images:
 
 ```powershell
 ./hdc-agent.cmd image-info -ImagePath ./actual.jpeg
@@ -247,6 +266,16 @@ Inspect and crop an image:
 ./hdc-agent.cmd crop-image `
   -ImagePath ./actual.jpeg -OutputPath ./crop.png `
   -CropX 100 -CropY 200 -CropWidth 600 -CropHeight 400
+```
+
+```powershell
+./hdc-agent.cmd resize-image `
+  -ImagePath ./actual.jpeg -OutputPath ./preview.jpeg `
+  -MaxWidth 960 -MaxHeight 1600
+
+./hdc-agent.cmd contact-sheet `
+  -ImagePaths './frame-1.jpeg,./frame-2.jpeg' `
+  -Labels 'before,after' -OutputPath ./contact-sheet.jpg
 ```
 
 Compare screenshots and emit a red-highlighted difference image:
@@ -377,20 +406,22 @@ code 0 while reporting an application-level failure in stdout.
 
 ## Codex plugin and MCP image return
 
-The directory is also a valid Codex plugin. Its MCP server exposes:
+The directory is also a valid Codex plugin. Its MCP server intentionally exposes six workflow-level tools:
 
-- `harmony_display`;
-- `harmony_wait_display`;
-- `harmony_fold`;
-- `harmony_rotate`;
-- `harmony_screenshot`;
-- `harmony_tap`;
-- `harmony_swipe`;
-- `harmony_gesture_capture`;
-- `harmony_compare_images`.
+- `harmony_inspect` for environment, device, and safe project discovery;
+- `harmony_device_run` for an ordered inline scenario with final, interval, checkpoint, or failure capture;
+- `harmony_project_run` for build, local/device test, and deploy workflows;
+- `harmony_capture` for one screenshot with a bounded preview by default;
+- `harmony_compare` for metrics and failure-only diff images by default;
+- `harmony_logs` for bounded filtered diagnostics.
 
-Touch tools accept physical or normalized coordinates and can return the post-action screenshot in the same tool
-response. Install Node dependencies once with `npm install`; validate the adapter with:
+All tools return a common compact `structuredContent` envelope with an output schema, short text summary, artifact
+paths, warnings, and an optional diagnostics path. Native command transcripts are not duplicated into successful MCP
+responses. `harmony_device_run` preserves original trace frames locally and returns one contact sheet by default;
+requesting original frames is an explicit diagnostic choice. Project discovery parses only the non-secret fields
+needed for product/module/bundle/ability selection and refuses ambiguous candidates.
+
+Install Node dependencies once with `npm install`; validate the adapter with:
 
 ```powershell
 npm run check

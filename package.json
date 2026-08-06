@@ -1,6 +1,6 @@
 {
   "name": "harmony-agent-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "MCP adapter for agent-facing HarmonyOS device automation.",
@@ -18,11 +18,12 @@
   },
   "scripts": {
     "check": "node --check mcp/server.mjs",
-    "test:mcp": "node mcp/smoke.mjs",
+    "test:mcp": "node mcp/smoke.mjs && node mcp/contract.mjs && node mcp/evaluate-golden.mjs",
     "test:mcp:device": "node mcp/device-integration.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "json5": "2.2.3",
     "zod": "4.3.6"
   }
 }

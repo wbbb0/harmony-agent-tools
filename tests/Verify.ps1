@@ -37,11 +37,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & (Join-Path $PSScriptRoot 'Smoke.ps1')
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'TraceCoordinator.ps1')
+if ($LASTEXITCODE -ne 0) {
+  throw 'Interaction trace coordinator test failed.'
+}
 & $NodePath --check (Join-Path $toolRoot 'mcp\server.mjs')
 if ($LASTEXITCODE -ne 0) {
   throw 'MCP syntax check failed.'
 }
-& $NodePath (Join-Path $toolRoot 'mcp\smoke.mjs')
+& npm run test:mcp
 if ($LASTEXITCODE -ne 0) {
   throw 'MCP smoke test failed.'
 }
