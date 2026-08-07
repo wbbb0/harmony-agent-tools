@@ -536,6 +536,12 @@ try {
 
   $result | ConvertTo-Json -Depth 20
 } catch {
-  [Console]::Error.WriteLine($_.Exception.Message)
+  if ($_.Exception.Data.Contains('AgentResult')) {
+    [Console]::Error.WriteLine(
+      ($_.Exception.Data['AgentResult'] | ConvertTo-Json -Depth 20 -Compress)
+    )
+  } else {
+    [Console]::Error.WriteLine($_.Exception.Message)
+  }
   exit 1
 }

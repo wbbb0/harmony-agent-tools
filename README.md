@@ -315,6 +315,13 @@ For example, a versioned DevEco Studio installation can be selected directly:
 `-DryRun` performs the same resolution and reports the actual process and complete argument list without starting
 Hvigor, so a JavaScript wrapper is shown as `node.exe "...\hvigorw.js" test ...`.
 
+For a real run, `test-local` does not treat the Hvigor process exit code as sufficient evidence of success. It reads
+the fresh Hypium `test_result.txt` generated for the selected module and product, returns its counts in `summary`,
+and reports `passed=true` only when the result exists, contains a valid non-empty summary, and has no failures or
+errors. A missing, stale, malformed, ambiguous, or failing result is a command failure even when Hvigor exits with
+code 0. The CLI writes the structured local-test result to stderr and exits non-zero; MCP returns an error result with
+the same result and Hypium counts in `data`.
+
 Build, install and execute the `ohosTest` package:
 
 ```powershell

@@ -57,6 +57,32 @@ function tailText(value, max = 6000) {
   return text.length <= max ? text : `…${text.slice(-max)}`;
 }
 
+function compactFailureData(data) {
+  if (!data || typeof data !== "object") return {};
+  if (data.action !== "localTest") return data;
+  return {
+    action: data.action,
+    projectRoot: data.projectRoot,
+    module: data.module,
+    product: data.product,
+    passed: data.passed,
+    command: data.command ? {
+      exitCode: data.command.exitCode ?? null,
+      durationMs: data.command.durationMs ?? null,
+    } : null,
+    summary: data.summary ?? null,
+  };
+}
+
+function structuredFailureMessage(command, data) {
+  if (data?.action !== "localTest") return `${command} failed.`;
+  const summary = data.summary;
+  if (summary?.testsRun !== null && summary?.testsRun !== undefined) {
+    return `${command} did not pass: ${summary.passed ?? 0}/${summary.testsRun} passed, ${summary.failures ?? 0} failure(s), ${summary.errors ?? 0} error(s).`;
+  }
+  return `${command} did not pass: ${summary?.failureReason || "no valid Hypium result was produced."}`;
+}
+
 export async function invokeCli(command, args = [], options = {}) {
   const id = options.runId || runId();
   try {
@@ -74,10 +100,20 @@ export async function invokeCli(command, args = [], options = {}) {
     const directory = path.join(artifactsRoot, "runs", id);
     await mkdir(directory, { recursive: true });
     const diagnosticsPath = path.join(directory, "error.log");
-    const detail = tailText(error.stderr || error.stdout || error.message);
-    await writeFile(diagnosticsPath, `${command} failed\n${detail}\n`, "utf8");
-    const wrapped = new Error(`${command} failed: ${detail}`);
+    const rawDetail = String(error.stderr || error.stdout || error.message).trim();
+    let structuredFailure = null;
+    try {
+      structuredFailure = JSON.parse(rawDetail);
+    } catch {
+      // Ordinary CLI diagnostics are plain text.
+    }
+    const detail = tailText(rawDetail);
+    await writeFile(diagnosticsPath, `${command} failed\n${rawDetail}\n`, "utf8");
+    const wrapped = new Error(structuredFailure
+      ? structuredFailureMessage(command, structuredFailure)
+      : `${command} failed: ${detail}`);
     wrapped.diagnosticsPath = diagnosticsPath;
+    if (structuredFailure) wrapped.data = compactFailureData(structuredFailure);
     throw wrapped;
   }
 }
@@ -130,7 +166,7 @@ function register(server, name, definition, handler) {
         warnings: [],
         diagnosticsPath: error.diagnosticsPath || null,
         artifacts: error.artifacts || [],
-        data: error.data || {},
+        data: compactFailureData(error.data),
       };
       const content = [{ type: "text", text: result.summary }];
       for (const imagePath of error.imagePaths || []) content.push(await imageContent(imagePath));

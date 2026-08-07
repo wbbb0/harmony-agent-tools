@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 
 $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repositoryRoot = Join-Path $toolRoot 'artifacts\smoke-project'
+if (Test-Path -LiteralPath $repositoryRoot) {
+  Remove-Item -LiteralPath $repositoryRoot -Recurse -Force
+}
 $package = Join-Path $repositoryRoot 'entry\build\default\outputs\default\entry-default-signed.hap'
 [void](New-Item -ItemType Directory -Path (Split-Path -Parent $package) -Force)
 [void](New-Item -ItemType File -Path $package -Force)
@@ -18,19 +21,22 @@ $javascriptHvigorPath = Join-Path $hvigorFixtureRoot `
 $bundledNodePath = Join-Path $hvigorFixtureRoot 'DevEco Studio\tools\node\node.exe'
 $explicitNodePath = Join-Path $hvigorFixtureRoot 'custom node\node.exe'
 $unsupportedHvigorPath = Join-Path $hvigorFixtureRoot 'hvigorw.txt'
+$resultHvigorPath = Join-Path $hvigorFixtureRoot 'result-hvigorw.cmd'
 foreach ($fixturePath in @(
   $defaultHvigorPath,
   $explicitHvigorPath,
   $javascriptHvigorPath,
   $bundledNodePath,
   $explicitNodePath,
-  $unsupportedHvigorPath
+  $unsupportedHvigorPath,
+  $resultHvigorPath
 )) {
   [void](New-Item -ItemType Directory -Path (Split-Path -Parent $fixturePath) -Force)
   [void](New-Item -ItemType File -Path $fixturePath -Force)
 }
 $cli = Join-Path $toolRoot 'hdc-agent.cmd'
 Import-Module (Join-Path $toolRoot 'HdcAgentTools.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $toolRoot 'TestAgentTools.psm1') -Force -DisableNameChecking
 
 function Assert-True {
   param(
@@ -73,6 +79,13 @@ function Invoke-CliFailure {
     output = $output -join [Environment]::NewLine
   }
 }
+Set-Content -LiteralPath $resultHvigorPath -Value @(
+  '@echo off',
+  'if "%TEST_AGENT_SKIP_RESULT%"=="1" exit /b 0',
+  'if not exist "%TEST_AGENT_RESULT_DIRECTORY%" mkdir "%TEST_AGENT_RESULT_DIRECTORY%"',
+  '> "%TEST_AGENT_RESULT_DIRECTORY%\test_result.txt" echo %TEST_AGENT_RESULT_CONTENT%',
+  'exit /b 0'
+)
 
 $module = Get-Module HdcAgentTools
 $currentPowerShell = (Get-Process -Id $PID).Path
@@ -236,8 +249,137 @@ try {
 Assert-True (
   $localTest.action -eq 'localTest' -and
   $localTest.command.dryRun -and
+  $localTest.passed -and
+  $null -eq $localTest.summary -and
   $localTest.command.command.StartsWith('"' + $defaultHvigorPath + '"')
 ) 'local test default Hvigor wrapper dry-run failed.'
+
+$localResultRoot = Join-Path $repositoryRoot 'entry\.test\default\intermediates\test\coverage_data'
+[void](New-Item -ItemType Directory -Path $localResultRoot -Force)
+$localResultPath = Join-Path $localResultRoot 'test_result.txt'
+$testAgentModule = Get-Module TestAgentTools
+
+Set-Content -LiteralPath $localResultPath `
+  -Value 'Tests run: 4, Failure: 1, Error: 0, Pass: 2, Ignore: 1'
+$failedSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (
+  $failedSummary.resultFound -and $failedSummary.countsValid -and
+  $failedSummary.testsRun -eq 4 -and $failedSummary.failures -eq 1 -and
+  $failedSummary.passed -eq 2 -and $failedSummary.ignored -eq 1
+) 'local test failure summary parsing failed.'
+
+Set-Content -LiteralPath $localResultPath `
+  -Value 'Tests run: 4, Failure: 0, Error: 0, Pass: 3, Ignore: 1'
+$passingSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (
+  $passingSummary.resultFound -and $passingSummary.countsValid -and
+  $passingSummary.testsRun -eq 4 -and $passingSummary.failures -eq 0 -and
+  $passingSummary.errors -eq 0
+) 'local test passing summary parsing failed.'
+
+$staleSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(1))
+Assert-True (-not $staleSummary.resultFound) 'stale local test result should not be accepted.'
+
+Set-Content -LiteralPath $localResultPath -Value 'not a Hypium summary'
+$malformedSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (
+  $malformedSummary.resultFound -and -not $malformedSummary.countsValid
+) 'malformed local test result should not be accepted.'
+
+Set-Content -LiteralPath $localResultPath `
+  -Value 'Tests run: 4, Failure: 0, Error: 0, Pass: 2, Ignore: 1'
+$invalidCountSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (-not $invalidCountSummary.countsValid) 'inconsistent local test counts should not be accepted.'
+
+Set-Content -LiteralPath $localResultPath `
+  -Value 'Tests run: 0, Failure: 0, Error: 0, Pass: 0, Ignore: 0'
+$zeroSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (
+  $zeroSummary.countsValid -and $zeroSummary.testsRun -eq 0
+) 'zero-test local result parsing failed.'
+
+$secondResultRoot = Join-Path $repositoryRoot `
+  'feature\.test\default\intermediates\test\coverage_data'
+[void](New-Item -ItemType Directory -Path $secondResultRoot -Force)
+Set-Content -LiteralPath (Join-Path $secondResultRoot 'test_result.txt') `
+  -Value 'Tests run: 1, Failure: 0, Error: 0, Pass: 1, Ignore: 0'
+$ambiguousSummary = & $testAgentModule {
+  param($Root, $StartedUtc)
+  Get-HarmonyLocalTestSummary -ProjectRoot $Root -Module 'entry' -Product 'default' `
+    -InvocationStartedUtc $StartedUtc
+} $repositoryRoot ([datetime]::UtcNow.AddMinutes(-1))
+Assert-True (
+  -not $ambiguousSummary.resultFound -and $ambiguousSummary.failureReason -match 'ambiguous'
+) 'multiple fresh local test results should be rejected as ambiguous.'
+Remove-Item -LiteralPath (Join-Path $repositoryRoot 'feature\.test') -Recurse -Force
+
+Remove-Item -LiteralPath (Join-Path $repositoryRoot 'entry\.test') -Recurse -Force
+$mappedResultRoot = Join-Path $repositoryRoot `
+  'features\foo\.test\default\intermediates\test\coverage_data'
+$env:TEST_AGENT_RESULT_DIRECTORY = $mappedResultRoot
+$env:TEST_AGENT_RESULT_CONTENT = 'Tests run: 2, Failure: 0, Error: 0, Pass: 2, Ignore: 0'
+$env:TEST_AGENT_SKIP_RESULT = '0'
+try {
+  $mappedLocalTest = Invoke-CliJson @(
+    'test-local', '-ProjectRoot', $repositoryRoot, '-Module', 'logical-name',
+    '-HvigorPath', $resultHvigorPath, '-SdkHome', $toolRoot
+  )
+  Assert-True (
+    $mappedLocalTest.passed -and $mappedLocalTest.summary.testsRun -eq 2 -and
+    $mappedLocalTest.summary.resultPath.StartsWith($mappedResultRoot)
+  ) 'local test did not discover a module result below a non-name srcPath.'
+
+  $env:TEST_AGENT_RESULT_CONTENT = 'Tests run: 2, Failure: 1, Error: 0, Pass: 1, Ignore: 0'
+  $failedLocalTest = Invoke-CliFailure @(
+    'test-local', '-ProjectRoot', $repositoryRoot, '-Module', 'logical-name',
+    '-HvigorPath', $resultHvigorPath, '-SdkHome', $toolRoot
+  )
+  $failedLocalResult = $failedLocalTest.output | ConvertFrom-Json
+  Assert-True (
+    $failedLocalTest.exitCode -ne 0 -and -not $failedLocalResult.passed -and
+    $failedLocalResult.summary.failures -eq 1
+  ) 'failing local tests did not produce a structured non-zero CLI result.'
+
+  Remove-Item -LiteralPath (Join-Path $repositoryRoot 'features\foo\.test') -Recurse -Force
+  $env:TEST_AGENT_SKIP_RESULT = '1'
+  $missingLocalTest = Invoke-CliFailure @(
+    'test-local', '-ProjectRoot', $repositoryRoot, '-Module', 'logical-name',
+    '-HvigorPath', $resultHvigorPath, '-SdkHome', $toolRoot
+  )
+  $missingLocalResult = $missingLocalTest.output | ConvertFrom-Json
+  Assert-True (
+    $missingLocalTest.exitCode -ne 0 -and -not $missingLocalResult.passed -and
+    -not $missingLocalResult.summary.resultFound
+  ) 'missing local test result did not produce a structured non-zero CLI result.'
+} finally {
+  Remove-Item Env:\TEST_AGENT_RESULT_DIRECTORY -ErrorAction SilentlyContinue
+  Remove-Item Env:\TEST_AGENT_RESULT_CONTENT -ErrorAction SilentlyContinue
+  Remove-Item Env:\TEST_AGENT_SKIP_RESULT -ErrorAction SilentlyContinue
+}
 
 $explicitWrapperLocalTest = Invoke-CliJson @(
   'test-local', '-ProjectRoot', $repositoryRoot,

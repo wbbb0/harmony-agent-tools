@@ -246,6 +246,105 @@ function Resolve-DevEcoSdkHome {
   throw 'DEVECO_SDK_HOME could not be resolved. Pass -SdkHome with the DevEco SDK parent directory.'
 }
 
+function Get-HarmonyLocalTestSummary {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ProjectRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Module,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Product,
+
+    [Parameter(Mandatory = $true)]
+    [datetime]$InvocationStartedUtc
+  )
+
+  $absoluteRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+  $rootPrefix = $absoluteRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+    [System.IO.Path]::DirectorySeparatorChar
+  $productSegment = [System.IO.Path]::DirectorySeparatorChar + '.test' +
+    [System.IO.Path]::DirectorySeparatorChar + $Product +
+    [System.IO.Path]::DirectorySeparatorChar
+  $candidates = @(Get-ChildItem -LiteralPath $absoluteRoot -Filter 'test_result.txt' `
+    -File -Recurse -ErrorAction SilentlyContinue |
+    Where-Object {
+      $candidatePath = [System.IO.Path]::GetFullPath($_.FullName)
+      $candidatePath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+      $candidatePath.IndexOf($productSegment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      $_.LastWriteTimeUtc -ge $InvocationStartedUtc
+    } |
+    Sort-Object -Property LastWriteTimeUtc -Descending)
+
+  if ($candidates.Count -eq 0) {
+    return [pscustomobject]@{
+      resultFound = $false
+      resultPath = $null
+      testsRun = $null
+      passed = $null
+      failures = $null
+      errors = $null
+      ignored = $null
+      countsValid = $false
+      failureReason = 'No fresh Hypium test_result.txt was found for the selected product.'
+    }
+  }
+
+  if ($candidates.Count -gt 1) {
+    return [pscustomobject]@{
+      resultFound = $false
+      resultPath = $null
+      testsRun = $null
+      passed = $null
+      failures = $null
+      errors = $null
+      ignored = $null
+      countsValid = $false
+      failureReason = "Multiple fresh Hypium results were found for product '${Product}'; result selection is ambiguous."
+    }
+  }
+
+  $resultFile = $candidates[0]
+  $content = Get-Content -LiteralPath $resultFile.FullName -Raw
+  $matches = [regex]::Matches(
+    $content,
+    'Tests run:\s*(\d+),\s*Failure:\s*(\d+),\s*Error:\s*(\d+),\s*Pass:\s*(\d+),\s*Ignore:\s*(\d+)',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  )
+  if ($matches.Count -eq 0) {
+    return [pscustomobject]@{
+      resultFound = $true
+      resultPath = $resultFile.FullName
+      testsRun = $null
+      passed = $null
+      failures = $null
+      errors = $null
+      ignored = $null
+      countsValid = $false
+      failureReason = 'The fresh Hypium result does not contain a recognizable summary.'
+    }
+  }
+
+  $summaryMatch = $matches[$matches.Count - 1]
+  $testsRun = [int]$summaryMatch.Groups[1].Value
+  $failureCount = [int]$summaryMatch.Groups[2].Value
+  $errorCount = [int]$summaryMatch.Groups[3].Value
+  $passCount = [int]$summaryMatch.Groups[4].Value
+  $ignoredCount = [int]$summaryMatch.Groups[5].Value
+  return [pscustomobject]@{
+    resultFound = $true
+    resultPath = $resultFile.FullName
+    testsRun = $testsRun
+    passed = $passCount
+    failures = $failureCount
+    errors = $errorCount
+    ignored = $ignoredCount
+    countsValid = ($passCount + $failureCount + $errorCount + $ignoredCount) -eq $testsRun
+    failureReason = $null
+  }
+}
+
 function Invoke-HarmonyLocalTest {
   [CmdletBinding()]
   param(
@@ -283,17 +382,40 @@ function Invoke-HarmonyLocalTest {
     '-p', "module=${Module}@default",
     '--no-daemon'
   )
+  $invocationStartedUtc = [datetime]::UtcNow
   $command = Invoke-HvigorCommand -Command $hvigorCommand -ArgumentList $arguments `
     -WorkingDirectory $absoluteRoot -Environment @{ DEVECO_SDK_HOME = $resolvedSdkHome } `
     -DryRun:$DryRun
-  return [pscustomobject]@{
+  $summary = if ($DryRun) {
+    $null
+  } else {
+    Get-HarmonyLocalTestSummary -ProjectRoot $absoluteRoot -Module $Module -Product $Product `
+      -InvocationStartedUtc $invocationStartedUtc
+  }
+  $passed = $command.exitCode -eq 0 -and (
+    $DryRun -or (
+      $summary.resultFound -and
+      $summary.countsValid -and
+      $summary.testsRun -gt 0 -and
+      $summary.failures -eq 0 -and
+      $summary.errors -eq 0
+    )
+  )
+  $result = [pscustomobject]@{
     action = 'localTest'
     projectRoot = $absoluteRoot
     module = $Module
     product = $Product
-    passed = $command.exitCode -eq 0
+    passed = $passed
     command = $command
+    summary = $summary
   }
+  if (-not $passed -and -not $DryRun) {
+    $exception = New-Object System.Exception('Local Hypium tests did not pass.')
+    $exception.Data['AgentResult'] = $result
+    throw $exception
+  }
+  return $result
 }
 
 function Invoke-HarmonyDeviceTest {

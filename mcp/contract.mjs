@@ -58,7 +58,13 @@ async function fakeInvoke(command, args) {
     return { action: "resizeImage", path: outputPath, width: 1, height: 1 };
   }
   if (command === "build") return { action: "build", exitCode: 0, output: "x".repeat(10000) };
-  if (command === "test-local") return { action: "localTest", passed: true, exitCode: 0 };
+  if (command === "test-local") {
+    if (args.some((value) => String(value).replaceAll("\\", "/").endsWith("/fake/failing-hvigorw.js"))) {
+      const data = { action: "localTest", projectRoot, module: "entry", product: "default", passed: false, command: { exitCode: 0, durationMs: 20, output: "x".repeat(20000) }, summary: { testsRun: 2, passed: 1, failures: 1, errors: 0 } };
+      throw Object.assign(new Error("Local Hypium tests did not pass."), { data });
+    }
+    return { action: "localTest", passed: true, exitCode: 0 };
+  }
   if (command === "logs") return { action: "logs", lines: Array.from({ length: 100 }, (_, index) => `${index} ${"log".repeat(200)}`) };
   throw new Error(`Unexpected fake command: ${command}`);
 }
@@ -89,6 +95,12 @@ try {
   assert.equal(localTest.structuredContent.data.passed, true); checks += 1;
   const localTestCall = calls.find((item) => item.command === "test-local");
   assert.ok(localTestCall.args.includes("-HvigorPath") && localTestCall.args.includes("-HvigorNodePath")); checks += 1;
+  const failedLocalTest = await client.callTool({ name: "harmony_project_run", arguments: { operation: "test-local", projectRoot, hvigorPath: "C:/fake/failing-hvigorw.js" } });
+  assert.equal(failedLocalTest.isError, true); checks += 1;
+  assert.equal(failedLocalTest.structuredContent.ok, false); checks += 1;
+  assert.equal(failedLocalTest.structuredContent.data.summary.failures, 1); checks += 1;
+  assert.equal(failedLocalTest.structuredContent.data.command.output, undefined); checks += 1;
+  assert.ok(JSON.stringify(failedLocalTest).length < 2000); checks += 1;
   const run = await client.callTool({
     name: "harmony_device_run",
     arguments: { steps: [{ action: "tap", xRatio: 0.5, yRatio: 0.5 }], capture: { mode: "final", presentation: "originals" } },
