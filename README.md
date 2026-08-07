@@ -421,6 +421,14 @@ responses. `harmony_device_run` preserves original trace frames locally and retu
 requesting original frames is an explicit diagnostic choice. Project discovery parses only the non-secret fields
 needed for product/module/bundle/ability selection and refuses ambiguous candidates.
 
+For screenshots sampled during one swipe-only scenario, use `capture.mode: "motion"`. The MCP adapter resolves
+normalized coordinates before starting the trace, then dispatches the touch command directly so capture time zero
+does not include a child scenario process or display lookup. It enforces swipe `durationMs`
+of at least `2000` and at least `800ms` between samples; `1000ms` is recommended for physical devices. It schedules
+frames inside the swipe time window, rejects plans that produce fewer than two frames or exceed `maxFrames`, and
+avoids a zero-time snapshot. Use `capture.mode: "final"` for an ordinary short swipe. The lower-level `interval` and
+`checkpoints` modes remain available for whole-scenario sampling and do not imply that frames land inside a swipe.
+
 Install Node dependencies once with `npm install`; validate the adapter with:
 
 ```powershell

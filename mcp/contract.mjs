@@ -30,7 +30,7 @@ async function fakeInvoke(command, args) {
     if (scenario.steps[0]?.milliseconds === 9999) throw new Error("synthetic scenario failure");
     return { action: "scenario", events: [{ huge: "x".repeat(10000) }] };
   }
-  if (command === "trace-scenario") {
+  if (command === "trace-scenario" || command === "gesture-capture") {
     const outputDirectory = args[args.indexOf("-OutputDirectory") + 1];
     const sheetPath = args[args.indexOf("-ContactSheetPath") + 1];
     const framePath = path.join(outputDirectory, "frame.jpeg");
@@ -39,7 +39,10 @@ async function fakeInvoke(command, args) {
     await writeFile(framePath, pixel);
     await writeFile(sheetPath, pixel);
     await writeFile(manifestPath, "{}");
-    return { action: "interactionTrace", frames: [{ path: framePath, phase: "during", actualStartMs: 4 }], droppedFrames: [{ requestedAtMs: 50 }], maxLatenessMs: 4, manifestPath, contactSheet: { path: sheetPath } };
+    const frames = [{ path: framePath, phase: "during", actualStartMs: 4 }];
+    return command === "gesture-capture"
+      ? { action: "gestureCapture", captures: frames, droppedFrames: [{ requestedAtMs: 50 }], maxLatenessMs: 4, manifestPath, contactSheet: { path: sheetPath } }
+      : { action: "interactionTrace", frames, droppedFrames: [{ requestedAtMs: 50 }], maxLatenessMs: 4, manifestPath, contactSheet: { path: sheetPath } };
   }
   if (command === "screenshot") {
     const outputPath = args[args.indexOf("-OutputPath") + 1];
@@ -95,20 +98,55 @@ try {
   assert.deepEqual(calls.filter((item) => item.command === "scenario").length, 1); checks += 1;
   const trace = await client.callTool({
     name: "harmony_device_run",
-    arguments: { steps: [{ action: "wait", milliseconds: 900 }, { action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 300 }], capture: { mode: "interval", frameCount: 3, presentation: "contact-sheet" } },
+    arguments: { steps: [{ action: "swipe", startXRatio: 0.5, startYRatio: 0.8, endXRatio: 0.5, endYRatio: 0.2, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2, presentation: "contact-sheet" } },
   });
   assert.equal(trace.isError, undefined); checks += 1;
   assert.equal(trace.content.filter((item) => item.type === "image").length, 1); checks += 1;
   assert.ok(JSON.stringify(trace.structuredContent).length < 2000); checks += 1;
   assert.equal(trace.structuredContent.warnings.length, 1); checks += 1;
-  const traceCall = calls.find((item) => item.command === "trace-scenario");
+  const traceCall = calls.find((item) => item.command === "gesture-capture");
   assert.equal(traceCall.args.filter((item) => item === "-OutputDirectory").length, 1); checks += 1;
   assert.equal(traceCall.args.filter((item) => item === "-RecordDurationMs").length, 1); checks += 1;
-  assert.equal(traceCall.args[traceCall.args.indexOf("-RecordDurationMs") + 1], "1700"); checks += 1;
-  const tracedScenario = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(traceCall.args[traceCall.args.indexOf("-ScenarioPath") + 1], "utf8")));
-  assert.equal(tracedScenario.steps[0].milliseconds, 900); checks += 1;
+  assert.ok(traceCall.args.includes("-StartXRatio") && traceCall.args.includes("-EndYRatio")); checks += 1;
+  assert.equal(traceCall.args[traceCall.args.indexOf("-RecordDurationMs") + 1], "2500"); checks += 1;
+  assert.equal(traceCall.args.includes("-FrameCount"), false); checks += 1;
+  const motionTimes = traceCall.args[traceCall.args.indexOf("-CaptureAtMs") + 1].split(",").map(Number);
+  assert.deepEqual(motionTimes, [1000, 2000]); checks += 1;
+  assert.ok(motionTimes[0] >= 800 && motionTimes.every((time, index) => index === 0 || time - motionTimes[index - 1] >= 800)); checks += 1;
   const conflictingCapture = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "wait", milliseconds: 1 }], capture: { mode: "interval", frameCount: 2, intervalMs: 100 } } });
   assert.equal(conflictingCapture.isError, true); checks += 1;
+  const gestureCallsBeforeRejectedMotion = calls.filter((item) => item.command === "gesture-capture").length;
+  const shortMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 1500 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(shortMotion.isError, true); checks += 1;
+  const fastMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }], capture: { mode: "motion", intervalMs: 700 } } });
+  assert.equal(fastMotion.isError, true); checks += 1;
+  const denseMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }], durationMs: 2500, capture: { mode: "motion", frameCount: 4 } } });
+  assert.equal(denseMotion.isError, true); checks += 1;
+  const sparseMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }], capture: { mode: "motion", intervalMs: 1500 } } });
+  assert.equal(sparseMotion.isError, true); checks += 1;
+  const overBudgetMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 12000 }], capture: { mode: "motion", intervalMs: 1000, before: true, maxFrames: 12 } } });
+  assert.equal(overBudgetMotion.isError, true); checks += 1;
+  const multipleSwipeMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }, { action: "swipe", startX: 3, startY: 4, endX: 1, endY: 2, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(multipleSwipeMotion.isError, true); checks += 1;
+  const delayedMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "wait", milliseconds: 1000 }, { action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(delayedMotion.isError, true); checks += 1;
+  const scheduledMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000, atMs: 5000 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(scheduledMotion.isError, true); checks += 1;
+  const mixedCoordinates = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, startXRatio: 0.5, startYRatio: 0.8, endXRatio: 0.5, endYRatio: 0.2, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(mixedCoordinates.isError, true); checks += 1;
+  const partialMixedCoordinates = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startXRatio: 0.5, startYRatio: 0.8, endXRatio: 0.5, endYRatio: 0.2, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2 } } });
+  assert.equal(partialMixedCoordinates.isError, true); checks += 1;
+  const excessiveDuration = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 16000 }], capture: { mode: "final" } } });
+  assert.equal(excessiveDuration.isError, true); checks += 1;
+  const keptMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000, keepMs: 4000 }], capture: { mode: "motion", intervalMs: 3000 } } });
+  assert.equal(keptMotion.isError, true); checks += 1;
+  assert.equal(calls.filter((item) => item.command === "gesture-capture").length, gestureCallsBeforeRejectedMotion); checks += 1;
+  const postRollMotion = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 2000 }], capture: { mode: "motion", frameCount: 2, postRollMs: 5000, presentation: "contact-sheet" } } });
+  assert.equal(postRollMotion.isError, undefined); checks += 1;
+  const postRollCall = calls.filter((item) => item.command === "gesture-capture").at(-1);
+  assert.equal(postRollCall.args[postRollCall.args.indexOf("-CaptureAtMs") + 1], "1000,2000"); checks += 1;
+  const wholeFlowShortSwipe = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "swipe", startX: 1, startY: 2, endX: 3, endY: 4, durationMs: 300 }, { action: "wait", milliseconds: 1000 }], capture: { mode: "checkpoints", atMs: [200] } } });
+  assert.equal(wholeFlowShortSwipe.isError, undefined); checks += 1;
   const foldTrace = await client.callTool({ name: "harmony_device_run", arguments: { steps: [{ action: "fold", state: "expanded" }], capture: { mode: "interval", frameCount: 2, presentation: "contact-sheet" } } });
   assert.equal(foldTrace.isError, undefined); checks += 1;
   const foldTraceCall = calls.filter((item) => item.command === "trace-scenario").at(-1);

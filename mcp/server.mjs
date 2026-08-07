@@ -14,7 +14,10 @@ const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
 const toolRoot = path.resolve(serverDirectory, "..");
 const cliPath = path.join(toolRoot, "hdc-agent.ps1");
 const artifactsRoot = path.join(toolRoot, "artifacts", "mcp");
-export const serverInstructions = "Use harmony_inspect before device or project work when the target, bundle, module, ability, or product is unknown. Prefer one harmony_device_run call with ordered steps over repeated tap/swipe calls. Request interval or checkpoint capture only when motion evidence matters; prefer a contact sheet to original frames to reduce tokens. Use harmony_project_run for build/test/deploy and harmony_logs only for bounded diagnostics. Results are compact; follow diagnosticsPath or artifact paths only when needed.";
+const MOTION_CAPTURE_MIN_INTERVAL_MS = 800;
+const MOTION_CAPTURE_RECOMMENDED_INTERVAL_MS = 1000;
+const MOTION_CAPTURE_MIN_SWIPE_DURATION_MS = 2000;
+export const serverInstructions = "Inspect unknown targets or projects first. Prefer one harmony_device_run scenario over repeated actions. Use capture.mode motion for one swipe with durationMs >= 2000 and cadence >= 800ms (1000ms recommended); use final for shorter swipes. Prefer contact sheets. Use harmony_project_run for build/test/deploy and harmony_logs for bounded diagnostics. Follow artifact paths only when needed.";
 
 const artifactSchema = z.object({
   kind: z.string(),
@@ -179,16 +182,87 @@ function scenarioStep(step) {
   return result;
 }
 
-function captureArguments(capture, durationMs, outputDirectory, sheetPath) {
+function scenarioTiming(steps) {
+  let cursorMs = 0;
+  const swipeWindows = [];
+  for (const step of steps) {
+    if (step.atMs !== undefined) cursorMs = Math.max(cursorMs, step.atMs);
+    const startMs = cursorMs;
+    if (step.action === "wait") cursorMs += step.milliseconds || 0;
+    else if (step.action === "tap") cursorMs += step.pressMs || 100;
+    else if (step.action === "swipe") cursorMs += (step.durationMs || 300) + (step.keepMs || 0);
+    else if (step.action === "waitDisplay") cursorMs += step.timeoutMs || 5000;
+    else if (step.action === "fold" || step.action === "rotate") cursorMs += 10000;
+    if (step.action === "swipe") swipeWindows.push({ startMs, endMs: startMs + (step.durationMs || 300), durationMs: (step.durationMs || 300) });
+  }
+  return { estimatedDurationMs: cursorMs, swipeWindows };
+}
+
+function resolveMotionCaptureTimes(input, minimumDurationMs) {
+  if (input.capture.mode !== "motion") return null;
+  if (input.capture.atMs.length > 0) throw new Error("capture.atMs is not used with capture.mode='motion'; use intervalMs or frameCount.");
+  if (input.capture.frameCount !== undefined && input.capture.intervalMs !== undefined) throw new Error("capture.frameCount and capture.intervalMs are mutually exclusive.");
+  const timing = scenarioTiming(input.steps);
+  if (input.steps.length !== 1 || timing.swipeWindows.length !== 1) throw new Error("capture.mode='motion' requires the scenario to contain exactly one swipe step; use interval or checkpoints for a whole flow.");
+  if (input.steps[0].atMs !== undefined) throw new Error("capture.mode='motion' does not accept step.atMs; the direct swipe starts when the trace begins.");
+  const window = timing.swipeWindows[0];
+  if (window.durationMs < MOTION_CAPTURE_MIN_SWIPE_DURATION_MS) {
+    throw new Error(`Swipe motion capture requires durationMs >= ${MOTION_CAPTURE_MIN_SWIPE_DURATION_MS}; use capture.mode='final' for a normal short swipe.`);
+  }
+  if (input.durationMs !== undefined && input.durationMs < minimumDurationMs) {
+    throw new Error(`Swipe motion capture durationMs must cover the full scenario (${minimumDurationMs}ms including startup allowance).`);
+  }
+  let times;
+  if (input.capture.frameCount !== undefined) {
+    if (input.capture.frameCount < 2) throw new Error("Swipe motion capture requires at least two sampled frames.");
+    const spacingMs = window.durationMs / input.capture.frameCount;
+    if (spacingMs < MOTION_CAPTURE_MIN_INTERVAL_MS) {
+      throw new Error(`Swipe motion capture frameCount is too dense; keep at least ${MOTION_CAPTURE_MIN_INTERVAL_MS}ms between samples (${MOTION_CAPTURE_RECOMMENDED_INTERVAL_MS}ms recommended).`);
+    }
+    times = Array.from({ length: input.capture.frameCount }, (_, index) => window.startMs + Math.round(window.durationMs * (index + 1) / input.capture.frameCount));
+  } else {
+    const intervalMs = input.capture.intervalMs || MOTION_CAPTURE_RECOMMENDED_INTERVAL_MS;
+    if (intervalMs < MOTION_CAPTURE_MIN_INTERVAL_MS) {
+      throw new Error(`Swipe motion capture intervalMs must be at least ${MOTION_CAPTURE_MIN_INTERVAL_MS} (${MOTION_CAPTURE_RECOMMENDED_INTERVAL_MS} recommended).`);
+    }
+    times = [];
+    for (let time = window.startMs + intervalMs; time <= window.endMs; time += intervalMs) times.push(time);
+  }
+  if (times.length < 2) throw new Error("Swipe motion capture settings produce fewer than two frames inside the swipe window; reduce intervalMs or increase durationMs.");
+  const totalFrames = times.length + (input.capture.before ? 1 : 0);
+  if (totalFrames > input.capture.maxFrames) throw new Error(`Swipe motion capture requests ${totalFrames} frames, exceeding maxFrames=${input.capture.maxFrames}.`);
+  return times;
+}
+
+function captureArguments(capture, durationMs, outputDirectory, sheetPath, motionTimes = null) {
   const args = ["-OutputDirectory", outputDirectory, "-RecordDurationMs", String(durationMs), "-MaxFrames", String(capture.maxFrames), "-MaxCaptureConcurrency", String(capture.maxConcurrency)];
   if (capture.before) args.push("-CaptureBefore");
-  if (capture.mode === "interval") {
+  if (capture.mode === "motion") {
+    args.push("-CaptureAtMs", motionTimes.join(","));
+  } else if (capture.mode === "interval") {
     if (capture.frameCount) args.push("-FrameCount", String(capture.frameCount));
     else args.push("-CaptureIntervalMs", String(capture.intervalMs || 500));
   } else {
     args.push("-CaptureAtMs", capture.atMs.join(","));
   }
   if (sheetPath) args.push("-ContactSheetPath", sheetPath, "-ContactSheetColumns", String(capture.columns || 0));
+  return args;
+}
+
+function gestureArguments(step) {
+  const args = [];
+  const pixelKeys = ["startX", "startY", "endX", "endY"];
+  const ratioKeys = ["startXRatio", "startYRatio", "endXRatio", "endYRatio"];
+  const pixelCount = pixelKeys.filter((key) => step[key] !== undefined).length;
+  const ratioCount = ratioKeys.filter((key) => step[key] !== undefined).length;
+  if (pixelCount === pixelKeys.length && ratioCount === 0) {
+    for (const key of pixelKeys) args.push(`-${key[0].toUpperCase()}${key.slice(1)}`, String(step[key]));
+  } else if (ratioCount === ratioKeys.length && pixelCount === 0) {
+    for (const key of ratioKeys) args.push(`-${key[0].toUpperCase()}${key.slice(1)}`, String(step[key]));
+  } else {
+    throw new Error("Swipe must provide exactly one complete pixel or normalized start/end coordinate set; do not mix coordinate families.");
+  }
+  args.push("-DurationMs", String(step.durationMs || 300), "-KeepMs", String(step.keepMs || 0));
   return args;
 }
 
@@ -240,49 +314,48 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
     pressMs: z.number().int().min(1).max(450).optional(),
     startX: z.number().int().optional(), startY: z.number().int().optional(), endX: z.number().int().optional(), endY: z.number().int().optional(),
     startXRatio: z.number().min(0).max(1).optional(), startYRatio: z.number().min(0).max(1).optional(), endXRatio: z.number().min(0).max(1).optional(), endYRatio: z.number().min(0).max(1).optional(),
-    durationMs: z.number().int().min(0).max(60000).optional(), keepMs: z.number().int().min(0).max(60000).optional(), milliseconds: z.number().int().min(0).max(3600000).optional(),
+    durationMs: z.number().int().min(1).max(15000).optional(), keepMs: z.number().int().min(0).max(60000).optional(), milliseconds: z.number().int().min(0).max(3600000).optional(),
     state: z.enum(["folded", "half", "expanded", "dual-expanded"]).optional(), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(), timeoutMs: z.number().int().optional(), atMs: z.number().int().nonnegative().optional(),
   });
   const captureSchema = z.object({
-    mode: z.enum(["none", "final", "interval", "checkpoints", "on-error"]).default("final"),
-    intervalMs: z.number().int().min(50).max(60000).optional(), frameCount: z.number().int().min(1).max(60).optional(), atMs: z.array(z.number().int().nonnegative()).default([]),
+    mode: z.enum(["none", "final", "motion", "interval", "checkpoints", "on-error"]).default("final"),
+    intervalMs: z.number().int().min(50).max(60000).optional().describe("Sampling interval; motion mode requires at least 800ms and 1000ms is recommended."), frameCount: z.number().int().min(1).max(60).optional(), atMs: z.array(z.number().int().nonnegative()).default([]),
     before: z.boolean().default(false), postRollMs: z.number().int().min(0).max(60000).default(0), maxFrames: z.number().int().min(1).max(60).default(12), maxConcurrency: z.number().int().min(1).max(4).default(2),
     presentation: z.enum(["contact-sheet", "originals", "both", "manifest-only"]).default("contact-sheet"), columns: z.number().int().min(0).max(12).default(0), maxReturnedImages: z.number().int().min(0).max(8).default(4),
   }).default({});
 
   register(server, "harmony_device_run", {
-    description: "Use this to execute an ordered HarmonyOS interaction as one scenario, optionally sampling screenshots during touch or the whole flow. Prefer contact-sheet presentation to reduce image tokens.",
+    description: "Use this to execute an ordered HarmonyOS interaction as one scenario. Use capture mode motion for exactly one swipe with durationMs >= 2000 and samples at least 800ms apart (1000ms recommended); use final for shorter swipes, or interval/checkpoints for whole-flow sampling. Prefer contact sheets.",
     inputSchema: { ...targetSchema, steps: z.array(stepSchema).min(1).max(100), capture: captureSchema, durationMs: z.number().int().min(1).max(3600000).optional() },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   }, async (input, id) => {
     const directory = path.join(artifactsRoot, "runs", id);
-    await mkdir(directory, { recursive: true });
     const scenarioPath = path.join(directory, "scenario.json");
-    await writeFile(scenarioPath, JSON.stringify({ steps: input.steps.map(scenarioStep) }, null, 2));
-    let estimatedDurationMs = 0;
-    for (const step of input.steps) {
-      if (step.atMs !== undefined) estimatedDurationMs = Math.max(estimatedDurationMs, step.atMs);
-      if (step.action === "wait") estimatedDurationMs += step.milliseconds || 0;
-      else if (step.action === "tap") estimatedDurationMs += step.pressMs || 100;
-      else if (step.action === "swipe") estimatedDurationMs += (step.durationMs || 300) + (step.keepMs || 0);
-      else if (step.action === "waitDisplay") estimatedDurationMs += step.timeoutMs || 5000;
-      else if (step.action === "fold" || step.action === "rotate") estimatedDurationMs += 10000;
-    }
-    let baseDurationMs = input.durationMs || Math.max(1000, estimatedDurationMs + 500);
+    const timing = scenarioTiming(input.steps);
+    const estimatedDurationMs = timing.estimatedDurationMs;
+    const minimumDurationMs = Math.max(1000, estimatedDurationMs + 500);
+    let baseDurationMs = input.durationMs || minimumDurationMs;
     if (input.capture.mode === "checkpoints" && input.capture.atMs.length > 0) baseDurationMs = Math.max(baseDurationMs, Math.max(...input.capture.atMs));
     const durationMs = baseDurationMs + input.capture.postRollMs;
     if (durationMs > 3600000) throw new Error("The capture duration plus post-roll must not exceed 3600000ms.");
+    const motionTimes = resolveMotionCaptureTimes(input, minimumDurationMs);
+    await mkdir(directory, { recursive: true });
+    await writeFile(scenarioPath, JSON.stringify({ steps: input.steps.map(scenarioStep) }, null, 2));
     const scenarioArgs = ["-ScenarioPath", scenarioPath, ...deviceArguments(input)];
     let raw;
     let imagePaths = [];
     const artifacts = [{ kind: "manifest", path: scenarioPath, role: "scenario" }];
     try {
-      if (["interval", "checkpoints"].includes(input.capture.mode)) {
+      if (["motion", "interval", "checkpoints"].includes(input.capture.mode)) {
         if (input.capture.frameCount !== undefined && input.capture.intervalMs !== undefined) throw new Error("capture.frameCount and capture.intervalMs are mutually exclusive.");
         if (input.capture.mode === "checkpoints" && input.capture.atMs.length === 0) throw new Error("capture.atMs requires at least one checkpoint.");
         const sheetPath = ["contact-sheet", "both"].includes(input.capture.presentation) ? path.join(directory, "trace-contact-sheet.jpg") : "";
-        raw = await invoke("trace-scenario", [...scenarioArgs, ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath)], { runId: id });
-        const frames = raw.frames || [];
+        if (input.capture.mode === "motion") {
+          raw = await invoke("gesture-capture", [...gestureArguments(input.steps[0]), ...deviceArguments(input), ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath, motionTimes)], { runId: id });
+        } else {
+          raw = await invoke("trace-scenario", [...scenarioArgs, ...captureArguments(input.capture, durationMs, path.join(directory, "frames"), sheetPath)], { runId: id });
+        }
+        const frames = raw.frames || raw.captures || [];
         if (raw.manifestPath) artifacts.push({ kind: "manifest", path: raw.manifestPath, role: "frames" });
         if (frames.length > 0) artifacts.push({ kind: "directory", path: path.dirname(frames[0].path), role: "original-frames" });
         if (raw.contactSheet?.path) {
@@ -316,9 +389,10 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
       }
       throw error;
     }
-    const actualStarts = (raw.frames || []).filter((frame) => frame.phase !== "before" && frame.actualStartMs !== null && frame.actualStartMs !== undefined).map((frame) => frame.actualStartMs);
+    const resultFrames = raw.frames || raw.captures || [];
+    const actualStarts = resultFrames.filter((frame) => frame.phase !== "before" && frame.actualStartMs !== null && frame.actualStartMs !== undefined).map((frame) => frame.actualStartMs);
     const effectiveIntervalMs = actualStarts.length > 1 ? Math.round((actualStarts.at(-1) - actualStarts[0]) / (actualStarts.length - 1)) : null;
-    const data = { stepCount: input.steps.length, captureMode: input.capture.mode, frameCount: raw.frames?.length || (imagePaths.length ? 1 : 0), droppedFrames: raw.droppedFrames?.length || 0, maxLatenessMs: raw.maxLatenessMs || 0, effectiveIntervalMs };
+    const data = { stepCount: input.steps.length, captureMode: input.capture.mode, frameCount: resultFrames.length || (imagePaths.length ? 1 : 0), droppedFrames: raw.droppedFrames?.length || 0, maxLatenessMs: raw.maxLatenessMs || 0, effectiveIntervalMs };
     const warnings = data.droppedFrames > 0 ? [`Dropped ${data.droppedFrames} frame(s) because snapshot concurrency was saturated${effectiveIntervalMs === null ? "." : `; effective captured interval was about ${effectiveIntervalMs}ms.`}`] : [];
     return toolResponse(baseResult("deviceRun", `Executed ${input.steps.length} device steps; captured ${data.frameCount} frame(s).`, id, data, artifacts, warnings), imagePaths);
   });
