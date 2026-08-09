@@ -137,7 +137,7 @@ function baseResult(action, summary, id, data = {}, artifacts = [], warnings = [
 }
 
 function compactArray(values, limit, project = (value) => value) {
-  const source = Array.isArray(values) ? values : [];
+  const source = Array.isArray(values) ? values : values == null ? [] : [values];
   return { values: source.slice(0, limit).map(project), truncated: source.length > limit };
 }
 
@@ -323,7 +323,7 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
     }
     if (["device", "all"].includes(input.scope)) {
       const targets = compactArray(await invoke("targets", configuredHdcArguments(), { runId: id }), 8, (item) => ({ target: item.target || item.id, state: item.state, model: item.model }));
-      const emulators = compactArray(await invoke("emulators", configuredHdcArguments(), { runId: id }), 8, (item) => ({ name: item.name, target: item.target, state: item.state }));
+      const emulators = compactArray(await invoke("emulators", configuredHdcArguments(), { runId: id }), 8, (item) => ({ name: item.name, target: item.target, state: item.hdcState ?? item.state }));
       data.targets = targets.values;
       data.emulators = emulators.values;
       if (targets.truncated || emulators.truncated) warnings.push("Device candidates were truncated to 8 entries.");
