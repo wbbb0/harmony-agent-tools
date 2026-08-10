@@ -23,7 +23,9 @@ process.env.HDC_PATH = "C:/fake/hdc.exe";
 async function fakeInvoke(command, args) {
   calls.push({ command, args });
   if (command === "doctor") return { action: "doctor", healthy: true, checks: Array.from({ length: 40 }, (_, index) => ({ name: `check-${index}`, status: "pass", detail: "x".repeat(500) })) };
-  if (command === "targets" || command === "emulators" || command === "packages") return [];
+  if (command === "targets") return { target: "127.0.0.1:5555", state: "Connected", model: "Pura X Max" };
+  if (command === "emulators") return { name: "Pura X Max", target: "127.0.0.1:5555", connected: true, hdcState: "Connected" };
+  if (command === "packages") return { path: path.join(projectRoot, "entry-default-signed.hap"), module: "entry", test: false };
   if (command === "scenario") {
     const scenarioPath = args[args.indexOf("-ScenarioPath") + 1];
     const scenario = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(scenarioPath, "utf8")));
@@ -78,11 +80,14 @@ let checks = 0;
 try {
   const inspect = await client.callTool({ name: "harmony_inspect", arguments: { scope: "project", projectRoot } });
   assert.equal(inspect.structuredContent.data.project.bundle, "com.example.contract"); checks += 1;
+  assert.equal(inspect.structuredContent.data.project.packages.length, 1); checks += 1;
   const environment = await client.callTool({ name: "harmony_inspect", arguments: { scope: "environment" } });
   assert.ok(JSON.stringify(environment.structuredContent).length < 2000); checks += 1;
   assert.ok(calls.find((item) => item.command === "doctor").args.includes("-HdcPath")); checks += 1;
   const devices = await client.callTool({ name: "harmony_inspect", arguments: { scope: "device" } });
   assert.equal(devices.isError, undefined); checks += 1;
+  assert.deepEqual(devices.structuredContent.data.targets, [{ target: "127.0.0.1:5555", state: "Connected", model: "Pura X Max" }]); checks += 1;
+  assert.deepEqual(devices.structuredContent.data.emulators, [{ name: "Pura X Max", target: "127.0.0.1:5555", state: "Connected" }]); checks += 1;
   assert.ok(calls.find((item) => item.command === "targets").args.includes("-HdcPath")); checks += 1;
   assert.ok(calls.find((item) => item.command === "emulators").args.includes("-HdcPath")); checks += 1;
   const escaped = await client.callTool({ name: "harmony_inspect", arguments: { scope: "project", projectRoot: escapingRoot } });

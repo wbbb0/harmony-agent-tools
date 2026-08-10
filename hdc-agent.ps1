@@ -534,7 +534,7 @@ try {
     }
   }
 
-  $result | ConvertTo-Json -Depth 20
+  ConvertTo-Json -InputObject $result -Depth 20
 } catch {
   if ($_.Exception.Data.Contains('AgentResult')) {
     [Console]::Error.WriteLine(

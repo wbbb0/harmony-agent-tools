@@ -32,7 +32,9 @@ On Windows, the command shim avoids changing the user or machine execution polic
 ./hdc-agent.cmd targets
 ```
 
-Every successful command writes JSON to stdout. Errors go to stderr and produce a non-zero exit code.
+Every successful command writes JSON to stdout. Errors go to stderr and produce a non-zero exit code. Commands that
+return collections, such as `targets`, `emulators`, and `packages`, always preserve their JSON array shape for zero,
+one, or many results.
 
 ## Device selection
 
