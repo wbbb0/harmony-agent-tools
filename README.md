@@ -447,6 +447,41 @@ npm run test:mcp:device -- "Pura 90"
 The repository does not modify a personal Codex marketplace or globally install the plugin. That remains an
 explicit consumer choice when this directory is extracted or distributed.
 
+### Required MCP environment
+
+The MCP server requires both machine-specific paths at startup. They are deliberately not inferred from `PATH`
+and are not stored in this portable repository:
+
+- `HDC_PATH`: absolute path to the `hdc.exe` file, normally under
+  `<DevEco SDK>\default\openharmony\toolchains\hdc.exe`;
+- `DEVECO_SDK_HOME`: absolute path to the DevEco SDK directory itself (for example
+  `C:\Program Files\Huawei\DevEco Studio\sdk`), not the DevEco Studio installation directory above it.
+
+MCP startup fails with a configuration error when either value is missing, relative, nonexistent, or the wrong
+filesystem type. This is intentional because DevEco installations commonly do not put `hdc` on `PATH`, while a
+missing SDK home otherwise fails only after a build or test has already started. `devecocli` must still be available
+on `PATH`; verify all three tools with `harmony_inspect` using `scope: "environment"` after registration.
+
+For a standalone Codex registration, validate the paths and pass both values explicitly:
+
+```powershell
+$toolRoot = 'C:\path\to\harmony-agent-tools'
+$sdkHome = 'C:\Program Files\Huawei\DevEco Studio\sdk'
+$hdcPath = Join-Path $sdkHome 'default\openharmony\toolchains\hdc.exe'
+
+if (-not (Test-Path -LiteralPath $hdcPath -PathType Leaf)) { throw "hdc not found: $hdcPath" }
+if (-not (Test-Path -LiteralPath $sdkHome -PathType Container)) { throw "SDK not found: $sdkHome" }
+
+codex mcp add harmony-agent-tools `
+  --env "HDC_PATH=$hdcPath" `
+  --env "DEVECO_SDK_HOME=$sdkHome" `
+  -- node (Join-Path $toolRoot 'mcp\server.mjs')
+```
+
+When using the plugin manifest instead of `codex mcp add`, set both variables in the environment inherited by
+Codex before starting the app. Restart Codex or open a new task after changing MCP registration; an existing task
+does not hot-load the new server configuration.
+
 ## Use as a Git submodule
 
 Pin the toolkit in another repository:

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,40 @@ const MOTION_CAPTURE_MIN_INTERVAL_MS = 800;
 const MOTION_CAPTURE_RECOMMENDED_INTERVAL_MS = 1000;
 const MOTION_CAPTURE_MIN_SWIPE_DURATION_MS = 2000;
 export const serverInstructions = "Inspect unknown targets or projects first. Prefer one harmony_device_run scenario over repeated actions. Use capture.mode motion for one swipe with durationMs >= 2000 and cadence >= 800ms (1000ms recommended); use final for shorter swipes. Prefer contact sheets. Use harmony_project_run for build/test/deploy and harmony_logs for bounded diagnostics. Follow artifact paths only when needed.";
+
+export function validateMcpEnvironment(environment = process.env) {
+  const requirements = [
+    { name: "HDC_PATH", kind: "file", description: "the absolute path to hdc.exe" },
+    { name: "DEVECO_SDK_HOME", kind: "directory", description: "the absolute path to the DevEco SDK directory" },
+  ];
+  const errors = [];
+  const configured = {};
+  for (const requirement of requirements) {
+    const value = String(environment[requirement.name] || "").trim();
+    if (!value) {
+      errors.push(`${requirement.name} is required (${requirement.description}).`);
+      continue;
+    }
+    if (!path.isAbsolute(value)) {
+      errors.push(`${requirement.name} must be absolute: ${value}`);
+      continue;
+    }
+    if (!existsSync(value)) {
+      errors.push(`${requirement.name} does not exist: ${value}`);
+      continue;
+    }
+    const stats = statSync(value);
+    if ((requirement.kind === "file" && !stats.isFile()) || (requirement.kind === "directory" && !stats.isDirectory())) {
+      errors.push(`${requirement.name} must reference a ${requirement.kind}: ${value}`);
+      continue;
+    }
+    configured[requirement.name] = path.resolve(value);
+  }
+  if (errors.length > 0) {
+    throw new Error(`Harmony MCP configuration error:\n- ${errors.join("\n- ")}\nRegister the stdio server with both --env HDC_PATH=... and --env DEVECO_SDK_HOME=... values.`);
+  }
+  return configured;
+}
 
 const artifactSchema = z.object({
   kind: z.string(),
@@ -559,6 +593,7 @@ export function createHarmonyServer({ invoke = invokeCli } = {}) {
 export const server = createHarmonyServer();
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  validateMcpEnvironment();
   await mkdir(artifactsRoot, { recursive: true });
   await server.connect(new StdioServerTransport());
 }
